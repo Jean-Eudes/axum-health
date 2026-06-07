@@ -1,0 +1,18 @@
+[server]
+port = 3000
+
+[server.tls]
+cert_path = "certs/localhost.crt.pem"
+key_path = "certs/localhost.key.pem"
+
+[health.http]
+urls = [
+  "https://www.google.fr",
+  "https://aol.com",
+]
+
+[health.dns]
+hosts = [
+  "localhost",
+  "example.com",
+]
