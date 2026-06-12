@@ -22,13 +22,13 @@ async fn actuator_root() -> impl IntoResponse {
             header::CONTENT_TYPE,
             HeaderValue::from_static("application/vnd.spring-boot.actuator.v3+json"),
         )],
-        axum::Json(crate::health::ActuatorLinksResponse {
-            links: crate::health::ActuatorLinks {
-                self_link: crate::health::Link {
+        axum::Json(health::ActuatorLinksResponse {
+            links: health::ActuatorLinks {
+                self_link: health::Link {
                     href: "/actuator".to_string(),
                     templated: false,
                 },
-                health: crate::health::Link {
+                health: health::Link {
                     href: "/actuator/health".to_string(),
                     templated: false,
                 },
@@ -57,6 +57,7 @@ mod tests {
                 health: crate::HealthConfig {
                     http: crate::HttpConfig { urls },
                     dns: crate::DnsConfig { hosts },
+                    disk: vec![],
                 },
             },
         })

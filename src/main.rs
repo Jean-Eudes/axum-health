@@ -39,6 +39,7 @@ pub(crate) struct TlsConfig {
 pub(crate) struct HealthConfig {
     pub(crate) http: HttpConfig,
     pub(crate) dns: DnsConfig,
+    pub(crate) disk: Vec<DiskConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -49,6 +50,12 @@ pub(crate) struct HttpConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct DnsConfig {
     pub(crate) hosts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct DiskConfig {
+    pub(crate) path: PathBuf,
+    pub(crate) threshold: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +197,14 @@ mod tests {
 
                 [health.dns]
                 hosts = ["localhost", "example.com"]
+
+                [[health.disk]]
+                path = "/"
+                threshold = 20
+
+                [[health.disk]]
+                path = "/tmp"
+                threshold = 10
             "#,
         )
         .unwrap();
@@ -207,5 +222,8 @@ mod tests {
         assert_eq!(config.health.http.urls[0], "https://example.com");
         assert_eq!(config.health.dns.hosts.len(), 2);
         assert_eq!(config.health.dns.hosts[0], "localhost");
+        assert_eq!(config.health.disk.len(), 2);
+        assert_eq!(config.health.disk[0].path, PathBuf::from("/"));
+        assert_eq!(config.health.disk[0].threshold, 20);
     }
 }

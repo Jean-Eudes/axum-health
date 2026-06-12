@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::AppState;
 
+mod disk;
 mod dns;
 mod http;
 
@@ -11,7 +12,7 @@ mod http;
 pub(crate) struct HealthResponse {
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    components: Option<BTreeMap<String, ComponentHealth>>,
+    components: Option<BTreeMap<&'static str, ComponentHealth>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -25,6 +26,7 @@ struct ComponentHealth {
 enum ComponentDetails {
     Http(http::HttpDetails),
     Dns(dns::DnsDetails),
+    Disk(disk::DiskDetails),
 }
 
 #[derive(Debug, Serialize)]
@@ -46,18 +48,20 @@ pub(crate) struct ActuatorLinks {
     pub(crate) health: Link,
 }
 
-pub(crate) async fn aggregate(State(state): State<AppState>) -> Json<HealthResponse> {
+pub async fn aggregate(State(state): State<AppState>) -> Json<HealthResponse> {
     let http = http::check(&state.client, &state.config.health.http.urls).await;
     let dns = dns::check(&state.config.health.dns.hosts).await;
-    let overall_status = if http.status == "UP" && dns.status == "UP" {
+    let disk = disk::check(&state.config.health.disk).await;
+    let overall_status = if http.status == "UP" && dns.status == "UP" && disk.status == "UP" {
         "UP"
     } else {
         "DOWN"
     };
 
     let mut components = BTreeMap::new();
-    components.insert("dns".to_string(), dns);
-    components.insert("http".to_string(), http);
+    components.insert("dns", dns);
+    components.insert("disk", disk);
+    components.insert("http", http);
 
     Json(HealthResponse {
         status: overall_status,
@@ -65,14 +69,14 @@ pub(crate) async fn aggregate(State(state): State<AppState>) -> Json<HealthRespo
     })
 }
 
-pub(crate) async fn liveness() -> Json<HealthResponse> {
+pub async fn liveness() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "UP",
         components: None,
     })
 }
 
-pub(crate) async fn readiness() -> Json<HealthResponse> {
+pub async fn readiness() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "UP",
         components: None,
@@ -81,11 +85,11 @@ pub(crate) async fn readiness() -> Json<HealthResponse> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{AppState, Config, DnsConfig, HttpConfig, resources};
+    use crate::{AppState, Config, DiskConfig, DnsConfig, HttpConfig, resources};
     use axum::{body::Body, http::StatusCode};
     use tower::ServiceExt;
 
-    fn test_app(urls: Vec<String>, hosts: Vec<String>) -> axum::Router {
+    fn test_app(urls: Vec<String>, hosts: Vec<String>, disks: Vec<DiskConfig>) -> axum::Router {
         resources::app(AppState {
             client: reqwest::Client::new(),
             config: Config {
@@ -99,6 +103,7 @@ mod tests {
                 health: crate::HealthConfig {
                     http: HttpConfig { urls },
                     dns: DnsConfig { hosts },
+                    disk: disks,
                 },
             },
         })
@@ -110,7 +115,7 @@ mod tests {
         let down_url = "mock://down".to_string();
         let urls = vec![ok_url.clone(), down_url.clone()];
 
-        let response = test_app(urls, vec![])
+        let response = test_app(urls, vec![], vec![])
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/actuator/health")
@@ -134,7 +139,7 @@ mod tests {
             .unwrap();
 
         let expected = format!(
-            r#"{{"status":"DOWN","components":{{"dns":{{"status":"UP","details":{{"hosts":[]}}}},"http":{{"status":"DOWN","details":{{"urls":[{{"url":"{ok_url}","status":"UP","http_status":200}},{{"url":"{down_url}","status":"DOWN","http_status":503}}]}}}}}}}}"#
+            r#"{{"status":"DOWN","components":{{"disk":{{"status":"UP","details":{{"disks":[]}}}},"dns":{{"status":"UP","details":{{"hosts":[]}}}},"http":{{"status":"DOWN","details":{{"urls":[{{"url":"{ok_url}","status":"UP","http_status":200}},{{"url":"{down_url}","status":"DOWN","http_status":503}}]}}}}}}}}"#
         );
 
         assert_eq!(body.as_ref(), expected.as_bytes());
@@ -145,6 +150,7 @@ mod tests {
         let response = test_app(
             vec![],
             vec!["localhost".to_string(), "no-such-host.invalid".to_string()],
+            vec![],
         )
         .oneshot(
             axum::http::Request::builder()
@@ -168,8 +174,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn health_endpoint_reports_disk_statuses() {
+        let response = test_app(
+            vec![],
+            vec![],
+            vec![
+                DiskConfig {
+                    path: std::env::temp_dir(),
+                    threshold: 0,
+                },
+                DiskConfig {
+                    path: std::env::temp_dir(),
+                    threshold: 100,
+                },
+            ],
+        )
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/actuator/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains(r#""disk":{"status":"DOWN""#));
+        assert!(body.contains(r#""path":""#));
+        assert!(body.contains(r#""threshold":0"#));
+        assert!(body.contains(r#""threshold":100"#));
+    }
+
+    #[tokio::test]
     async fn liveness_endpoint_stays_up() {
-        let response = test_app(vec![], vec![])
+        let response = test_app(vec![], vec![], vec![])
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/actuator/health/liveness")
@@ -190,7 +234,7 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_endpoint_stays_up() {
-        let response = test_app(vec![], vec![])
+        let response = test_app(vec![], vec![], vec![])
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/actuator/health/readiness")

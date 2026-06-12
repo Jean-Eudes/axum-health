@@ -16,3 +16,11 @@ hosts = [
   "localhost",
   "example.com",
 ]
+
+[[health.disk]]
+path = "/"
+threshold = 5
+
+[[health.disk]]
+path = "/tmp"
+threshold = 10
