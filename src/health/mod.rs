@@ -1,8 +1,9 @@
 use axum::Json;
+use futures::future::{BoxFuture, join_all};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-use crate::AppState;
+use crate::{AppState, HealthConfig};
 
 mod disk;
 mod dns;
@@ -19,6 +20,11 @@ pub(crate) struct HealthResponse {
 struct ComponentHealth {
     status: &'static str,
     details: ComponentDetails,
+}
+
+trait HealthCheck: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn check(&self) -> BoxFuture<'static, ComponentHealth>;
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -49,27 +55,54 @@ pub(crate) struct ActuatorLinks {
 }
 
 pub(crate) async fn aggregate_response(state: AppState) -> HealthResponse {
-    let (http, dns, disk) = tokio::join!(
-        http::check(&state.client, &state.config.health.http.urls),
-        dns::check(&state.config.health.dns.hosts),
-        disk::check(&state.config.health.disk)
-    );
+    let components = collect_components(&state.config.health, &state.client).await;
 
-    let overall_status = if http.status == "UP" && dns.status == "UP" && disk.status == "UP" {
+    let overall_status = if components
+        .values()
+        .all(|component| component.status == "UP")
+    {
         "UP"
     } else {
         "DOWN"
     };
 
-    let mut components = BTreeMap::new();
-    components.insert("dns", dns);
-    components.insert("disk", disk);
-    components.insert("http", http);
-
     HealthResponse {
         status: overall_status,
         components: Some(components),
     }
+}
+
+async fn collect_components(
+    health: &HealthConfig,
+    client: &reqwest::Client,
+) -> BTreeMap<&'static str, ComponentHealth> {
+    let checks = configured_checks(health, client);
+    let components = join_all(checks.into_iter().map(|check| async move {
+        let name = check.name();
+        let component = check.check().await;
+        (name, component)
+    }))
+    .await;
+
+    components.into_iter().collect()
+}
+
+fn configured_checks(health: &HealthConfig, client: &reqwest::Client) -> Vec<Box<dyn HealthCheck>> {
+    let mut checks: Vec<Box<dyn HealthCheck>> = Vec::new();
+
+    if let Some(http) = &health.http {
+        checks.push(Box::new(http::HttpHealthCheck::new(client, http)));
+    }
+
+    if let Some(dns) = &health.dns {
+        checks.push(Box::new(dns::DnsHealthCheck::new(dns)));
+    }
+
+    if let Some(disks) = &health.disk {
+        checks.push(Box::new(disk::DiskHealthCheck::new(disks)));
+    }
+
+    checks
 }
 
 pub async fn liveness() -> Json<HealthResponse> {
@@ -88,7 +121,7 @@ pub async fn readiness() -> Json<HealthResponse> {
 
 #[cfg(test)]
 mod tests {
-    use super::HealthResponse;
+    use super::{HealthResponse, configured_checks};
     use crate::{DiskConfig, resources, test_app_state};
     use axum::{body::Body, http::StatusCode};
     use moka::future::Cache;
@@ -108,7 +141,7 @@ mod tests {
         let down_url = "mock://down".to_string();
         let urls = vec![ok_url.clone(), down_url.clone()];
 
-        let response = resources::app(test_app_state(urls, vec![], vec![]))
+        let response = resources::app(test_app_state(Some(urls), Some(vec![]), Some(vec![])))
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/actuator/health")
@@ -141,9 +174,12 @@ mod tests {
     #[tokio::test]
     async fn health_endpoint_reports_dns_resolution_statuses() {
         let response = resources::app(test_app_state(
-            vec![],
-            vec!["localhost".to_string(), "no-such-host.invalid".to_string()],
-            vec![],
+            Some(vec![]),
+            Some(vec![
+                "localhost".to_string(),
+                "no-such-host.invalid".to_string(),
+            ]),
+            Some(vec![]),
         ))
         .oneshot(
             axum::http::Request::builder()
@@ -169,9 +205,9 @@ mod tests {
     #[tokio::test]
     async fn health_endpoint_reports_disk_statuses() {
         let response = resources::app(test_app_state(
-            vec![],
-            vec![],
-            vec![
+            Some(vec![]),
+            Some(vec![]),
+            Some(vec![
                 DiskConfig {
                     path: std::env::temp_dir(),
                     threshold: 0,
@@ -180,7 +216,7 @@ mod tests {
                     path: std::env::temp_dir(),
                     threshold: 100,
                 },
-            ],
+            ]),
         ))
         .oneshot(
             axum::http::Request::builder()
@@ -206,7 +242,7 @@ mod tests {
 
     #[tokio::test]
     async fn liveness_endpoint_stays_up() {
-        let response = resources::app(test_app_state(vec![], vec![], vec![]))
+        let response = resources::app(test_app_state(Some(vec![]), Some(vec![]), Some(vec![])))
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/actuator/health/liveness")
@@ -227,7 +263,7 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_endpoint_stays_up() {
-        let response = resources::app(test_app_state(vec![], vec![], vec![]))
+        let response = resources::app(test_app_state(Some(vec![]), Some(vec![]), Some(vec![])))
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/actuator/health/readiness")
@@ -244,6 +280,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(body.as_ref(), br#"{"status":"UP"}"#);
+    }
+
+    #[test]
+    fn configured_checks_only_include_present_sections() {
+        let state = test_app_state(Some(vec!["mock://up".to_string()]), None, Some(vec![]));
+        let checks = configured_checks(&state.config.health, &state.client);
+        let names: Vec<_> = checks.iter().map(|check| check.name()).collect();
+
+        assert_eq!(names, vec!["http", "disk"]);
     }
 
     fn test_health_cache(ttl: Duration) -> Cache<u8, HealthResponse> {

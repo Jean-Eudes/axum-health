@@ -1,12 +1,79 @@
-use futures::future::join_all;
+use futures::FutureExt;
+use futures::future::{BoxFuture, join_all};
 use serde::Serialize;
 use std::{io, path::Path};
 
-use super::{ComponentDetails, ComponentHealth};
+use super::{ComponentDetails, ComponentHealth, HealthCheck};
 
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct DiskDetails {
     disks: Vec<DiskCheck>,
+}
+
+pub(super) struct DiskHealthCheck {
+    disks: Vec<crate::DiskConfig>,
+}
+
+impl DiskHealthCheck {
+    pub(super) fn new(config: &[crate::DiskConfig]) -> Self {
+        Self {
+            disks: config.to_vec(),
+        }
+    }
+}
+
+impl HealthCheck for DiskHealthCheck {
+    fn name(&self) -> &'static str {
+        "disk"
+    }
+
+    fn check(&self) -> BoxFuture<'static, ComponentHealth> {
+        let disks = self.disks.clone();
+
+        async move {
+            let results = join_all(disks.into_iter().map(|disk| async move {
+                match disk_usage_percent_remaining(&disk.path) {
+                    Ok((total_bytes, available_bytes, percent_remaining)) => {
+                        let status = if percent_remaining <= disk.threshold {
+                            "DOWN"
+                        } else {
+                            "UP"
+                        };
+
+                        DiskCheck {
+                            path: disk.path.display().to_string(),
+                            status,
+                            total_bytes: Some(total_bytes),
+                            available_bytes: Some(available_bytes),
+                            percent_remaining: Some(percent_remaining),
+                            threshold: disk.threshold,
+                            error: None,
+                        }
+                    }
+                    Err(err) => DiskCheck {
+                        path: disk.path.display().to_string(),
+                        status: "DOWN",
+                        total_bytes: None,
+                        available_bytes: None,
+                        percent_remaining: None,
+                        threshold: disk.threshold,
+                        error: Some(err.to_string()),
+                    },
+                }
+            }))
+            .await;
+
+            ComponentHealth {
+                status: if results.iter().all(|check| check.status == "UP") {
+                    "UP"
+                } else {
+                    "DOWN"
+                },
+                details: ComponentDetails::Disk(DiskDetails { disks: results }),
+            }
+        }
+        .boxed()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -22,49 +89,6 @@ struct DiskCheck {
     threshold: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
-}
-
-pub(super) async fn check(disks: &[crate::DiskConfig]) -> ComponentHealth {
-    let results = join_all(disks.iter().cloned().map(|disk| async move {
-        match disk_usage_percent_remaining(&disk.path) {
-            Ok((total_bytes, available_bytes, percent_remaining)) => {
-                let status = if percent_remaining <= disk.threshold {
-                    "DOWN"
-                } else {
-                    "UP"
-                };
-
-                DiskCheck {
-                    path: disk.path.display().to_string(),
-                    status,
-                    total_bytes: Some(total_bytes),
-                    available_bytes: Some(available_bytes),
-                    percent_remaining: Some(percent_remaining),
-                    threshold: disk.threshold,
-                    error: None,
-                }
-            }
-            Err(err) => DiskCheck {
-                path: disk.path.display().to_string(),
-                status: "DOWN",
-                total_bytes: None,
-                available_bytes: None,
-                percent_remaining: None,
-                threshold: disk.threshold,
-                error: Some(err.to_string()),
-            },
-        }
-    }))
-    .await;
-
-    ComponentHealth {
-        status: if results.iter().all(|check| check.status == "UP") {
-            "UP"
-        } else {
-            "DOWN"
-        },
-        details: ComponentDetails::Disk(DiskDetails { disks: results }),
-    }
 }
 
 fn disk_usage_percent_remaining(path: &Path) -> io::Result<(u64, u64, u8)> {

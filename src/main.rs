@@ -39,9 +39,9 @@ pub(crate) struct TlsConfig {
 pub(crate) struct HealthConfig {
     #[serde(default)]
     pub(crate) cache: HealthCacheConfig,
-    pub(crate) http: HttpConfig,
-    pub(crate) dns: DnsConfig,
-    pub(crate) disk: Vec<DiskConfig>,
+    pub(crate) http: Option<HttpConfig>,
+    pub(crate) dns: Option<DnsConfig>,
+    pub(crate) disk: Option<Vec<DiskConfig>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -165,9 +165,9 @@ fn load_private_key(path: impl AsRef<Path>) -> PrivateKeyDer<'static> {
 
 #[cfg(test)]
 pub(crate) fn test_app_state(
-    urls: Vec<String>,
-    hosts: Vec<String>,
-    disks: Vec<DiskConfig>,
+    urls: Option<Vec<String>>,
+    hosts: Option<Vec<String>>,
+    disks: Option<Vec<DiskConfig>>,
 ) -> AppState {
     AppState {
         client: reqwest::Client::new(),
@@ -181,8 +181,8 @@ pub(crate) fn test_app_state(
             },
             health: HealthConfig {
                 cache: HealthCacheConfig::default(),
-                http: HttpConfig { urls },
-                dns: DnsConfig { hosts },
+                http: urls.map(|urls| HttpConfig { urls }),
+                dns: hosts.map(|hosts| DnsConfig { hosts }),
                 disk: disks,
             },
         },
@@ -267,13 +267,19 @@ mod tests {
             config.server.tls.key_path,
             PathBuf::from("certs/localhost.key.pem")
         );
-        assert_eq!(config.health.http.urls.len(), 2);
-        assert_eq!(config.health.http.urls[0], "https://example.com");
+        assert_eq!(config.health.http.as_ref().unwrap().urls.len(), 2);
+        assert_eq!(
+            config.health.http.as_ref().unwrap().urls[0],
+            "https://example.com"
+        );
         assert_eq!(config.health.cache.ttl_seconds, 10);
-        assert_eq!(config.health.dns.hosts.len(), 2);
-        assert_eq!(config.health.dns.hosts[0], "localhost");
-        assert_eq!(config.health.disk.len(), 2);
-        assert_eq!(config.health.disk[0].path, PathBuf::from("/"));
-        assert_eq!(config.health.disk[0].threshold, 20);
+        assert_eq!(config.health.dns.as_ref().unwrap().hosts.len(), 2);
+        assert_eq!(config.health.dns.as_ref().unwrap().hosts[0], "localhost");
+        assert_eq!(config.health.disk.as_ref().unwrap().len(), 2);
+        assert_eq!(
+            config.health.disk.as_ref().unwrap()[0].path,
+            PathBuf::from("/")
+        );
+        assert_eq!(config.health.disk.as_ref().unwrap()[0].threshold, 20);
     }
 }

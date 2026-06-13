@@ -73,7 +73,7 @@ mod tests {
 
     #[tokio::test]
     async fn actuator_root_returns_spring_style_links() {
-        let response = app(test_app_state(vec![], vec![], vec![]))
+        let response = app(test_app_state(Some(vec![]), Some(vec![]), Some(vec![])))
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/actuator")
