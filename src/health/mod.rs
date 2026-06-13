@@ -1,4 +1,4 @@
-use axum::{Json, extract::State};
+use axum::Json;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -8,20 +8,20 @@ mod disk;
 mod dns;
 mod http;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct HealthResponse {
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     components: Option<BTreeMap<&'static str, ComponentHealth>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct ComponentHealth {
     status: &'static str,
     details: ComponentDetails,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 enum ComponentDetails {
     Http(http::HttpDetails),
@@ -29,29 +29,32 @@ enum ComponentDetails {
     Disk(disk::DiskDetails),
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct Link {
     pub(crate) href: String,
     pub(crate) templated: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct ActuatorLinksResponse {
     #[serde(rename = "_links")]
     pub(crate) links: ActuatorLinks,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct ActuatorLinks {
     #[serde(rename = "self")]
     pub(crate) self_link: Link,
     pub(crate) health: Link,
 }
 
-pub async fn aggregate(State(state): State<AppState>) -> Json<HealthResponse> {
-    let http = http::check(&state.client, &state.config.health.http.urls).await;
-    let dns = dns::check(&state.config.health.dns.hosts).await;
-    let disk = disk::check(&state.config.health.disk).await;
+pub(crate) async fn aggregate_response(state: AppState) -> HealthResponse {
+    let (http, dns, disk) = tokio::join!(
+        http::check(&state.client, &state.config.health.http.urls),
+        dns::check(&state.config.health.dns.hosts),
+        disk::check(&state.config.health.disk)
+    );
+
     let overall_status = if http.status == "UP" && dns.status == "UP" && disk.status == "UP" {
         "UP"
     } else {
@@ -63,10 +66,10 @@ pub async fn aggregate(State(state): State<AppState>) -> Json<HealthResponse> {
     components.insert("disk", disk);
     components.insert("http", http);
 
-    Json(HealthResponse {
+    HealthResponse {
         status: overall_status,
         components: Some(components),
-    })
+    }
 }
 
 pub async fn liveness() -> Json<HealthResponse> {
@@ -85,29 +88,19 @@ pub async fn readiness() -> Json<HealthResponse> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{AppState, Config, DiskConfig, DnsConfig, HttpConfig, resources};
+    use super::HealthResponse;
+    use crate::{DiskConfig, resources, test_app_state};
     use axum::{body::Body, http::StatusCode};
+    use moka::future::Cache;
+    use std::{
+        future::Future,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
     use tower::ServiceExt;
-
-    fn test_app(urls: Vec<String>, hosts: Vec<String>, disks: Vec<DiskConfig>) -> axum::Router {
-        resources::app(AppState {
-            client: reqwest::Client::new(),
-            config: Config {
-                server: crate::ServerConfig {
-                    port: 3000,
-                    tls: crate::TlsConfig {
-                        cert_path: "certs/localhost.crt.pem".into(),
-                        key_path: "certs/localhost.key.pem".into(),
-                    },
-                },
-                health: crate::HealthConfig {
-                    http: HttpConfig { urls },
-                    dns: DnsConfig { hosts },
-                    disk: disks,
-                },
-            },
-        })
-    }
 
     #[tokio::test]
     async fn health_endpoint_reports_http_statuses() {
@@ -115,7 +108,7 @@ mod tests {
         let down_url = "mock://down".to_string();
         let urls = vec![ok_url.clone(), down_url.clone()];
 
-        let response = test_app(urls, vec![], vec![])
+        let response = resources::app(test_app_state(urls, vec![], vec![]))
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/actuator/health")
@@ -147,11 +140,11 @@ mod tests {
 
     #[tokio::test]
     async fn health_endpoint_reports_dns_resolution_statuses() {
-        let response = test_app(
+        let response = resources::app(test_app_state(
             vec![],
             vec!["localhost".to_string(), "no-such-host.invalid".to_string()],
             vec![],
-        )
+        ))
         .oneshot(
             axum::http::Request::builder()
                 .uri("/actuator/health")
@@ -175,7 +168,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_endpoint_reports_disk_statuses() {
-        let response = test_app(
+        let response = resources::app(test_app_state(
             vec![],
             vec![],
             vec![
@@ -188,7 +181,7 @@ mod tests {
                     threshold: 100,
                 },
             ],
-        )
+        ))
         .oneshot(
             axum::http::Request::builder()
                 .uri("/actuator/health")
@@ -213,7 +206,7 @@ mod tests {
 
     #[tokio::test]
     async fn liveness_endpoint_stays_up() {
-        let response = test_app(vec![], vec![], vec![])
+        let response = resources::app(test_app_state(vec![], vec![], vec![]))
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/actuator/health/liveness")
@@ -234,7 +227,7 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_endpoint_stays_up() {
-        let response = test_app(vec![], vec![], vec![])
+        let response = resources::app(test_app_state(vec![], vec![], vec![]))
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/actuator/health/readiness")
@@ -251,5 +244,62 @@ mod tests {
             .unwrap();
 
         assert_eq!(body.as_ref(), br#"{"status":"UP"}"#);
+    }
+
+    fn test_health_cache(ttl: Duration) -> Cache<u8, HealthResponse> {
+        Cache::builder().time_to_live(ttl).max_capacity(1).build()
+    }
+
+    fn next_health_response(
+        calls: Arc<AtomicUsize>,
+    ) -> impl Future<Output = HealthResponse> + Send + 'static {
+        async move {
+            let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            HealthResponse {
+                status: if call == 1 { "UP" } else { "DOWN" },
+                components: None,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn health_cache_returns_cached_values_until_ttl_expires() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cache = test_health_cache(Duration::from_secs(60));
+
+        let first = cache
+            .get_with(0, next_health_response(Arc::clone(&calls)))
+            .await;
+        let second = cache
+            .get_with(0, next_health_response(Arc::clone(&calls)))
+            .await;
+
+        assert_eq!(first.status, "UP");
+        assert_eq!(second.status, "UP");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn health_cache_recomputes_after_ttl_expires() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cache = test_health_cache(Duration::from_millis(10));
+
+        let first = cache
+            .get_with(0, next_health_response(Arc::clone(&calls)))
+            .await;
+        let second = cache
+            .get_with(0, next_health_response(Arc::clone(&calls)))
+            .await;
+        assert_eq!(first.status, "UP");
+        assert_eq!(second.status, "UP");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let third = cache
+            .get_with(0, next_health_response(Arc::clone(&calls)))
+            .await;
+        assert_eq!(third.status, "DOWN");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

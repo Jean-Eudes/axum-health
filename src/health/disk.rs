@@ -4,12 +4,12 @@ use std::{io, path::Path};
 
 use super::{ComponentDetails, ComponentHealth};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(super) struct DiskDetails {
     disks: Vec<DiskCheck>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct DiskCheck {
     path: String,
     status: &'static str,

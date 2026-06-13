@@ -3,12 +3,12 @@ use serde::Serialize;
 
 use super::{ComponentDetails, ComponentHealth};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(super) struct DnsDetails {
     hosts: Vec<DnsCheck>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct DnsCheck {
     host: String,
     status: &'static str,

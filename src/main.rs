@@ -37,9 +37,29 @@ pub(crate) struct TlsConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct HealthConfig {
+    #[serde(default)]
+    pub(crate) cache: HealthCacheConfig,
     pub(crate) http: HttpConfig,
     pub(crate) dns: DnsConfig,
     pub(crate) disk: Vec<DiskConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct HealthCacheConfig {
+    #[serde(default = "default_health_cache_ttl_seconds")]
+    pub(crate) ttl_seconds: u64,
+}
+
+impl Default for HealthCacheConfig {
+    fn default() -> Self {
+        Self {
+            ttl_seconds: default_health_cache_ttl_seconds(),
+        }
+    }
+}
+
+fn default_health_cache_ttl_seconds() -> u64 {
+    5
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -143,6 +163,32 @@ fn load_private_key(path: impl AsRef<Path>) -> PrivateKeyDer<'static> {
         .unwrap_or_else(|err| panic!("failed to parse private key file {}: {err}", path.display()))
 }
 
+#[cfg(test)]
+pub(crate) fn test_app_state(
+    urls: Vec<String>,
+    hosts: Vec<String>,
+    disks: Vec<DiskConfig>,
+) -> AppState {
+    AppState {
+        client: reqwest::Client::new(),
+        config: Config {
+            server: ServerConfig {
+                port: 3000,
+                tls: TlsConfig {
+                    cert_path: "certs/localhost.crt.pem".into(),
+                    key_path: "certs/localhost.key.pem".into(),
+                },
+            },
+            health: HealthConfig {
+                cache: HealthCacheConfig::default(),
+                http: HttpConfig { urls },
+                dns: DnsConfig { hosts },
+                disk: disks,
+            },
+        },
+    }
+}
+
 impl axum::serve::Listener for TlsListener {
     type Io = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
     type Addr = SocketAddr;
@@ -195,6 +241,9 @@ mod tests {
                 [health.http]
                 urls = ["https://example.com", "https://example.org"]
 
+                [health.cache]
+                ttl_seconds = 10
+
                 [health.dns]
                 hosts = ["localhost", "example.com"]
 
@@ -220,6 +269,7 @@ mod tests {
         );
         assert_eq!(config.health.http.urls.len(), 2);
         assert_eq!(config.health.http.urls[0], "https://example.com");
+        assert_eq!(config.health.cache.ttl_seconds, 10);
         assert_eq!(config.health.dns.hosts.len(), 2);
         assert_eq!(config.health.dns.hosts[0], "localhost");
         assert_eq!(config.health.disk.len(), 2);

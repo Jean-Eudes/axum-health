@@ -3,12 +3,12 @@ use serde::Serialize;
 
 use super::{ComponentDetails, ComponentHealth};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(super) struct HttpDetails {
     urls: Vec<HttpCheck>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct HttpCheck {
     url: String,
     status: &'static str,

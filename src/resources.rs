@@ -4,16 +4,43 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use moka::future::Cache;
+use std::time::Duration;
 
 use crate::{AppState, health};
 
 pub(crate) fn app(state: AppState) -> Router {
+    let health_cache = health_response_cache(state.config.health.cache.ttl_seconds);
+
     Router::new()
         .route("/actuator", get(actuator_root))
-        .route("/actuator/health", get(health::aggregate))
+        .route(
+            "/actuator/health",
+            get({
+                let state = state.clone();
+                let health_cache = health_cache.clone();
+                move || {
+                    let state = state.clone();
+                    let health_cache = health_cache.clone();
+                    async move {
+                        let response = health_cache
+                            .get_with(0, async move { health::aggregate_response(state).await })
+                            .await;
+
+                        axum::Json(response)
+                    }
+                }
+            }),
+        )
         .route("/actuator/health/liveness", get(health::liveness))
         .route("/actuator/health/readiness", get(health::readiness))
-        .with_state(state)
+}
+
+fn health_response_cache(ttl_seconds: u64) -> Cache<u8, health::HealthResponse> {
+    Cache::builder()
+        .time_to_live(Duration::from_secs(ttl_seconds))
+        .max_capacity(1)
+        .build()
 }
 
 async fn actuator_root() -> impl IntoResponse {
@@ -40,32 +67,13 @@ async fn actuator_root() -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_app_state;
     use axum::{body::Body, http::StatusCode};
     use tower::ServiceExt;
 
-    fn test_app(urls: Vec<String>, hosts: Vec<String>) -> Router {
-        app(AppState {
-            client: reqwest::Client::new(),
-            config: crate::Config {
-                server: crate::ServerConfig {
-                    port: 3000,
-                    tls: crate::TlsConfig {
-                        cert_path: "certs/localhost.crt.pem".into(),
-                        key_path: "certs/localhost.key.pem".into(),
-                    },
-                },
-                health: crate::HealthConfig {
-                    http: crate::HttpConfig { urls },
-                    dns: crate::DnsConfig { hosts },
-                    disk: vec![],
-                },
-            },
-        })
-    }
-
     #[tokio::test]
     async fn actuator_root_returns_spring_style_links() {
-        let response = test_app(vec![], vec![])
+        let response = app(test_app_state(vec![], vec![], vec![]))
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/actuator")

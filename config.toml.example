@@ -11,6 +11,9 @@ urls = [
   "https://aol.com",
 ]
 
+[health.cache]
+ttl_seconds = 5
+
 [health.dns]
 hosts = [
   "localhost",
