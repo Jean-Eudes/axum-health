@@ -19,55 +19,55 @@ use tokio_rustls::{
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
-    pub server: ServerConfig,
-    pub health: HealthConfig,
+    server: ServerConfig,
+    health: HealthConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
-    pub port: u16,
-    pub tls: TlsConfig,
+    port: u16,
+    tls: TlsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TlsConfig {
-    pub cert_path: PathBuf,
-    pub key_path: PathBuf,
+    cert_path: PathBuf,
+    key_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HealthConfig {
-    pub cache: HealthCacheConfig,
-    pub http: Option<HttpConfig>,
-    pub dns: Option<DnsConfig>,
-    pub disk: Option<Vec<DiskConfig>>,
+    cache: HealthCacheConfig,
+    http: Option<HttpConfig>,
+    dns: Option<DnsConfig>,
+    disk: Option<Vec<DiskConfig>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HealthCacheConfig {
-    pub ttl_seconds: u64,
+    ttl_seconds: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HttpConfig {
-    pub urls: Vec<String>,
+    urls: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DnsConfig {
-    pub hosts: Vec<String>,
+    hosts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DiskConfig {
-    pub path: PathBuf,
-    pub threshold: u8,
+    path: PathBuf,
+    threshold: u8,
 }
 
 #[derive(Debug, Clone)]
 pub struct AppState {
-    pub client: reqwest::Client,
-    pub config: Config,
+    client: reqwest::Client,
+    config: Config,
 }
 
 struct TlsListener {
