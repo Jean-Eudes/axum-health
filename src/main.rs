@@ -18,70 +18,56 @@ use tokio_rustls::{
 };
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct Config {
-    pub(crate) server: ServerConfig,
-    pub(crate) health: HealthConfig,
+pub struct Config {
+    pub server: ServerConfig,
+    pub health: HealthConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct ServerConfig {
-    pub(crate) port: u16,
-    pub(crate) tls: TlsConfig,
+pub struct ServerConfig {
+    pub port: u16,
+    pub tls: TlsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct TlsConfig {
-    pub(crate) cert_path: PathBuf,
-    pub(crate) key_path: PathBuf,
+pub struct TlsConfig {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct HealthConfig {
-    #[serde(default)]
-    pub(crate) cache: HealthCacheConfig,
-    pub(crate) http: Option<HttpConfig>,
-    pub(crate) dns: Option<DnsConfig>,
-    pub(crate) disk: Option<Vec<DiskConfig>>,
+pub struct HealthConfig {
+    pub cache: HealthCacheConfig,
+    pub http: Option<HttpConfig>,
+    pub dns: Option<DnsConfig>,
+    pub disk: Option<Vec<DiskConfig>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct HealthCacheConfig {
-    #[serde(default = "default_health_cache_ttl_seconds")]
-    pub(crate) ttl_seconds: u64,
-}
-
-impl Default for HealthCacheConfig {
-    fn default() -> Self {
-        Self {
-            ttl_seconds: default_health_cache_ttl_seconds(),
-        }
-    }
-}
-
-fn default_health_cache_ttl_seconds() -> u64 {
-    5
+pub struct HealthCacheConfig {
+    pub ttl_seconds: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct HttpConfig {
-    pub(crate) urls: Vec<String>,
+pub struct HttpConfig {
+    pub urls: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct DnsConfig {
-    pub(crate) hosts: Vec<String>,
+pub struct DnsConfig {
+    pub hosts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct DiskConfig {
-    pub(crate) path: PathBuf,
-    pub(crate) threshold: u8,
+pub struct DiskConfig {
+    pub path: PathBuf,
+    pub threshold: u8,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct AppState {
-    pub(crate) client: reqwest::Client,
-    pub(crate) config: Config,
+pub struct AppState {
+    pub client: reqwest::Client,
+    pub config: Config,
 }
 
 struct TlsListener {
@@ -180,7 +166,9 @@ pub(crate) fn test_app_state(
                 },
             },
             health: HealthConfig {
-                cache: HealthCacheConfig::default(),
+                cache: HealthCacheConfig {
+                    ttl_seconds: 5,
+                },
                 http: urls.map(|urls| HttpConfig { urls }),
                 dns: hosts.map(|hosts| DnsConfig { hosts }),
                 disk: disks,
