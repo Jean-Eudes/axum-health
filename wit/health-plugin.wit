@@ -1,0 +1,19 @@
+package axum-health:health@0.1.0;
+
+interface health {
+  enum status {
+    up,
+    down,
+  }
+
+  record health-result {
+    status: status,
+    details-json: string,
+  }
+
+  check: func(config-json: string) -> result<health-result, string>;
+}
+
+world health-plugin {
+  export health;
+}

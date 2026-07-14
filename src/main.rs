@@ -4,7 +4,7 @@ mod resources;
 use serde::Deserialize;
 use std::{
     env, fs,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr, ToSocketAddrs},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -41,6 +41,43 @@ pub struct HealthConfig {
     http: Option<HttpConfig>,
     dns: Option<DnsConfig>,
     disk: Option<Vec<DiskConfig>>,
+    plugins: Option<PluginsConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PluginsConfig {
+    timeout_seconds: u64,
+    #[serde(default)]
+    items: Vec<PluginConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PluginConfig {
+    name: String,
+    path: PathBuf,
+    #[serde(default = "empty_toml_table")]
+    config: toml::Value,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+    #[serde(default)]
+    permissions: PluginPermissions,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PluginPermissions {
+    #[serde(default)]
+    tcp: Vec<TcpPermission>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TcpPermission {
+    host: Option<String>,
+    cidr: Option<String>,
+    ports: Vec<u16>,
+}
+
+fn empty_toml_table() -> toml::Value {
+    toml::Value::Table(toml::map::Map::new())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -68,6 +105,7 @@ pub struct DiskConfig {
 pub struct AppState {
     client: reqwest::Client,
     config: Config,
+    plugins: Arc<Vec<health::Plugin>>,
 }
 
 struct TlsListener {
@@ -78,11 +116,12 @@ struct TlsListener {
 #[tokio::main]
 async fn main() {
     let config_path = env::var("AXUM_HEALTH_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
-    let config = load_config(config_path);
+    let config = load_config(&config_path);
     let port = config.server.port;
     let tls = load_tls_acceptor(&config.server.tls);
     let state = AppState {
         client: reqwest::Client::new(),
+        plugins: Arc::new(health::load_plugins(&config, &config_path)),
         config,
     };
 
@@ -109,6 +148,62 @@ fn load_config(path: impl AsRef<Path>) -> Config {
 
     toml::from_str(&raw)
         .unwrap_or_else(|err| panic!("failed to parse config file {}: {err}", path.display()))
+}
+
+pub(crate) fn resolve_tcp_permissions(
+    permissions: &[TcpPermission],
+) -> Result<Vec<health::TcpPermissionRule>, String> {
+    permissions
+        .iter()
+        .map(|permission| {
+            if permission.ports.is_empty() {
+                return Err("TCP permission must declare at least one port".to_string());
+            }
+
+            if permission.host.is_some() == permission.cidr.is_some() {
+                return Err("TCP permission must declare exactly one of host or cidr".to_string());
+            }
+
+            let rule = if let Some(host) = &permission.host {
+                let addresses = (host.as_str(), 0)
+                    .to_socket_addrs()
+                    .map_err(|err| format!("failed to resolve TCP permission host {host}: {err}"))?
+                    .map(|address| address.ip())
+                    .collect::<Vec<_>>();
+                if addresses.is_empty() {
+                    return Err(format!(
+                        "TCP permission host resolved to no addresses: {host}"
+                    ));
+                }
+                health::TcpPermissionRule::from_addresses(addresses, permission.ports.clone())
+            } else {
+                let (address, prefix) = parse_cidr(permission.cidr.as_deref().unwrap())?;
+                health::TcpPermissionRule::from_cidr(address, prefix, permission.ports.clone())
+            };
+
+            Ok(rule)
+        })
+        .collect()
+}
+
+fn parse_cidr(value: &str) -> Result<(IpAddr, u8), String> {
+    let (address, prefix) = value
+        .split_once('/')
+        .ok_or_else(|| format!("TCP permission CIDR must include a prefix: {value}"))?;
+    let address: IpAddr = address
+        .parse()
+        .map_err(|err| format!("invalid TCP permission CIDR {value}: {err}"))?;
+    let prefix: u8 = prefix
+        .parse()
+        .map_err(|err| format!("invalid TCP permission prefix {value}: {err}"))?;
+    let max_prefix = match address {
+        IpAddr::V4(_) => 32,
+        IpAddr::V6(_) => 128,
+    };
+    if prefix > max_prefix {
+        return Err(format!("TCP permission prefix is out of range: {value}"));
+    }
+    Ok((address, prefix))
 }
 
 fn load_tls_acceptor(config: &TlsConfig) -> TlsAcceptor {
@@ -157,6 +252,7 @@ pub(crate) fn test_app_state(
 ) -> AppState {
     AppState {
         client: reqwest::Client::new(),
+        plugins: Arc::new(vec![]),
         config: Config {
             server: ServerConfig {
                 port: 3000,
@@ -166,12 +262,11 @@ pub(crate) fn test_app_state(
                 },
             },
             health: HealthConfig {
-                cache: HealthCacheConfig {
-                    ttl_seconds: 5,
-                },
+                cache: HealthCacheConfig { ttl_seconds: 5 },
                 http: urls.map(|urls| HttpConfig { urls }),
                 dns: hosts.map(|hosts| DnsConfig { hosts }),
                 disk: disks,
+                plugins: None,
             },
         },
     }
@@ -242,6 +337,19 @@ mod tests {
                 [[health.disk]]
                 path = "/tmp"
                 threshold = 10
+
+                [health.plugins]
+                timeout_seconds = 5
+
+                [[health.plugins.items]]
+                name = "postgres"
+                path = "plugins/postgres-health.wasm"
+                config = { database = "application" }
+                timeout_seconds = 3
+
+                [[health.plugins.items.permissions.tcp]]
+                cidr = "10.0.0.0/8"
+                ports = [5432]
             "#,
         )
         .unwrap();
@@ -269,5 +377,24 @@ mod tests {
             PathBuf::from("/")
         );
         assert_eq!(config.health.disk.as_ref().unwrap()[0].threshold, 20);
+        let plugins = config.health.plugins.as_ref().unwrap();
+        assert_eq!(plugins.timeout_seconds, 5);
+        assert_eq!(plugins.items[0].name, "postgres");
+        assert_eq!(plugins.items[0].timeout_seconds, Some(3));
+        assert_eq!(plugins.items[0].permissions.tcp[0].ports, vec![5432]);
+    }
+
+    #[test]
+    fn tcp_permissions_allow_only_configured_cidr_and_port() {
+        let rules = resolve_tcp_permissions(&[TcpPermission {
+            host: None,
+            cidr: Some("10.0.0.0/8".to_string()),
+            ports: vec![5432],
+        }])
+        .unwrap();
+
+        assert!(rules[0].allows("10.20.30.40:5432".parse().unwrap()));
+        assert!(!rules[0].allows("10.20.30.40:5433".parse().unwrap()));
+        assert!(!rules[0].allows("192.168.1.10:5432".parse().unwrap()));
     }
 }

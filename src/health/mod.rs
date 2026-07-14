@@ -8,6 +8,9 @@ use crate::{AppState, HealthConfig};
 mod disk;
 mod dns;
 mod http;
+mod plugin;
+
+pub(crate) use plugin::{Plugin, TcpPermissionRule, load_plugins};
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct HealthResponse {
@@ -47,7 +50,7 @@ pub(crate) struct ActuatorLinks {
 }
 
 pub(crate) async fn aggregate_response(state: AppState) -> HealthResponse {
-    let components = collect_components(&state.config.health, &state.client).await;
+    let components = collect_components(&state.config.health, &state.client, &state.plugins).await;
 
     let overall_status = if components
         .values()
@@ -67,8 +70,9 @@ pub(crate) async fn aggregate_response(state: AppState) -> HealthResponse {
 async fn collect_components(
     health: &HealthConfig,
     client: &reqwest::Client,
+    plugins: &[Plugin],
 ) -> BTreeMap<&'static str, ComponentHealth> {
-    let checks = configured_checks(health, client);
+    let checks = configured_checks(health, client, plugins);
     let components = join_all(checks.into_iter().map(|check| async move {
         let name = check.name();
         let component = check.check().await;
@@ -79,7 +83,11 @@ async fn collect_components(
     components.into_iter().collect()
 }
 
-fn configured_checks(health: &HealthConfig, client: &reqwest::Client) -> Vec<Box<dyn HealthCheck>> {
+fn configured_checks(
+    health: &HealthConfig,
+    client: &reqwest::Client,
+    plugins: &[Plugin],
+) -> Vec<Box<dyn HealthCheck>> {
     let mut checks: Vec<Box<dyn HealthCheck>> = Vec::new();
 
     if let Some(http) = &health.http {
@@ -93,6 +101,13 @@ fn configured_checks(health: &HealthConfig, client: &reqwest::Client) -> Vec<Box
     if let Some(disks) = &health.disk {
         checks.push(Box::new(disk::DiskHealthCheck::new(disks)));
     }
+
+    checks.extend(
+        plugins
+            .iter()
+            .cloned()
+            .map(|plugin| Box::new(plugin) as Box<dyn HealthCheck>),
+    );
 
     checks
 }
@@ -277,7 +292,7 @@ mod tests {
     #[test]
     fn configured_checks_only_include_present_sections() {
         let state = test_app_state(Some(vec!["mock://up".to_string()]), None, Some(vec![]));
-        let checks = configured_checks(&state.config.health, &state.client);
+        let checks = configured_checks(&state.config.health, &state.client, &state.plugins);
         let names: Vec<_> = checks.iter().map(|check| check.name()).collect();
 
         assert_eq!(names, vec!["http", "disk"]);
