@@ -27,3 +27,16 @@ threshold = 5
 [[health.disk]]
 path = "/tmp"
 threshold = 10
+
+[health.plugins]
+timeout_seconds = 5
+
+[[health.plugins.items]]
+name = "postgres"
+path = "plugins/postgres-health.wasm"
+timeout_seconds = 3
+config = { database = "application" }
+
+[[health.plugins.items.permissions.tcp]]
+cidr = "10.0.0.0/8"
+ports = [5432]
