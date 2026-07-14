@@ -2,10 +2,10 @@ use futures::FutureExt;
 use futures::future::{BoxFuture, join_all};
 use serde::Serialize;
 
-use super::{ComponentDetails, ComponentHealth, HealthCheck};
+use super::{ComponentHealth, HealthCheck};
 
 #[derive(Debug, Clone, Serialize)]
-pub(super) struct HttpDetails {
+struct HttpDetails {
     urls: Vec<HttpCheck>,
 }
 
@@ -71,7 +71,8 @@ impl HealthCheck for HttpHealthCheck {
                 } else {
                     "DOWN"
                 },
-                details: ComponentDetails::Http(HttpDetails { urls: results }),
+                details: serde_json::to_value(HttpDetails { urls: results })
+                    .expect("HttpDetails is always serializable"),
             }
         }
         .boxed()

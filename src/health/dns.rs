@@ -2,10 +2,10 @@ use futures::FutureExt;
 use futures::future::{BoxFuture, join_all};
 use serde::Serialize;
 
-use super::{ComponentDetails, ComponentHealth, HealthCheck};
+use super::{ComponentHealth, HealthCheck};
 
 #[derive(Debug, Clone, Serialize)]
-pub(super) struct DnsDetails {
+struct DnsDetails {
     hosts: Vec<DnsCheck>,
 }
 
@@ -69,7 +69,8 @@ impl HealthCheck for DnsHealthCheck {
                 } else {
                     "DOWN"
                 },
-                details: ComponentDetails::Dns(DnsDetails { hosts: results }),
+                details: serde_json::to_value(DnsDetails { hosts: results })
+                    .expect("DnsDetails is always serializable"),
             }
         }
         .boxed()

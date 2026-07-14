@@ -19,20 +19,12 @@ pub(crate) struct HealthResponse {
 #[derive(Debug, Clone, Serialize)]
 struct ComponentHealth {
     status: &'static str,
-    details: ComponentDetails,
+    details: serde_json::Value,
 }
 
 trait HealthCheck: Send + Sync {
     fn name(&self) -> &'static str;
     fn check(&self) -> BoxFuture<'static, ComponentHealth>;
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
-enum ComponentDetails {
-    Http(http::HttpDetails),
-    Dns(dns::DnsDetails),
-    Disk(disk::DiskDetails),
 }
 
 #[derive(Debug, Clone, Serialize)]

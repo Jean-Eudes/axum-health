@@ -3,10 +3,10 @@ use futures::future::{BoxFuture, join_all};
 use serde::Serialize;
 use std::{io, path::Path};
 
-use super::{ComponentDetails, ComponentHealth, HealthCheck};
+use super::{ComponentHealth, HealthCheck};
 
 #[derive(Debug, Clone, Serialize)]
-pub(super) struct DiskDetails {
+struct DiskDetails {
     disks: Vec<DiskCheck>,
 }
 
@@ -69,7 +69,8 @@ impl HealthCheck for DiskHealthCheck {
                 } else {
                     "DOWN"
                 },
-                details: ComponentDetails::Disk(DiskDetails { disks: results }),
+                details: serde_json::to_value(DiskDetails { disks: results })
+                    .expect("DiskDetails is always serializable"),
             }
         }
         .boxed()
