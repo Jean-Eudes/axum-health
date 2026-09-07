@@ -17,6 +17,11 @@ use tokio_rustls::{
     },
 };
 
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     server: ServerConfig,
@@ -166,9 +171,7 @@ pub(crate) fn test_app_state(
                 },
             },
             health: HealthConfig {
-                cache: HealthCacheConfig {
-                    ttl_seconds: 5,
-                },
+                cache: HealthCacheConfig { ttl_seconds: 5 },
                 http: urls.map(|urls| HttpConfig { urls }),
                 dns: hosts.map(|hosts| DnsConfig { hosts }),
                 disk: disks,
