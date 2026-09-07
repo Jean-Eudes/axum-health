@@ -82,15 +82,19 @@ async fn collect_components(
 fn configured_checks(health: &HealthConfig, client: &reqwest::Client) -> Vec<Box<dyn HealthCheck>> {
     let mut checks: Vec<Box<dyn HealthCheck>> = Vec::new();
 
-    if let Some(http) = &health.http {
-        checks.push(Box::new(http::HttpHealthCheck::new(client, http)));
+    if let Some(http) = &health.checks.http {
+        checks.push(Box::new(http::HttpHealthCheck::new(
+            client,
+            http,
+            health.config.http_timeout_seconds,
+        )));
     }
 
-    if let Some(dns) = &health.dns {
+    if let Some(dns) = &health.checks.dns {
         checks.push(Box::new(dns::DnsHealthCheck::new(dns)));
     }
 
-    if let Some(disks) = &health.disk {
+    if let Some(disks) = &health.checks.disk {
         checks.push(Box::new(disk::DiskHealthCheck::new(disks)));
     }
 

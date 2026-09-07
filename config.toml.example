@@ -5,25 +5,30 @@ port = 3000
 cert_path = "certs/localhost.crt.pem"
 key_path = "certs/localhost.key.pem"
 
-[health.http]
-urls = [
-  "https://www.google.fr",
-  "https://aol.com",
-]
+[health.config]
+cache_ttl_seconds = 5
+http_timeout_seconds = 5
 
-[health.cache]
-ttl_seconds = 5
+[[health.checks.http]]
+url = "https://www.google.fr"
 
-[health.dns]
-hosts = [
-  "localhost",
-  "example.com",
-]
+[[health.checks.http]]
+url = "https://aol.com"
 
-[[health.disk]]
+[[health.checks.http]]
+url = "https://internal.example.com/health"
+resolve = "10.0.0.5"
+
+[[health.checks.dns]]
+host = "localhost"
+
+[[health.checks.dns]]
+host = "example.com"
+
+[[health.checks.disk]]
 path = "/"
 threshold = 5
 
-[[health.disk]]
+[[health.checks.disk]]
 path = "/tmp"
 threshold = 10

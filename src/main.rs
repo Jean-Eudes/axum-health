@@ -4,7 +4,7 @@ mod resources;
 use serde::Deserialize;
 use std::{
     env, fs,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -42,25 +42,35 @@ pub struct TlsConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HealthConfig {
-    cache: HealthCacheConfig,
-    http: Option<HttpConfig>,
-    dns: Option<DnsConfig>,
+    config: HealthRuntimeConfig,
+    checks: HealthChecksConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct HealthRuntimeConfig {
+    cache_ttl_seconds: u64,
+    http_timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct HealthChecksConfig {
+    #[serde(default)]
+    http: Option<Vec<HttpCheckConfig>>,
+    #[serde(default)]
+    dns: Option<Vec<DnsCheckConfig>>,
+    #[serde(default)]
     disk: Option<Vec<DiskConfig>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct HealthCacheConfig {
-    ttl_seconds: u64,
+pub struct HttpCheckConfig {
+    url: String,
+    resolve: Option<IpAddr>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct HttpConfig {
-    urls: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct DnsConfig {
-    hosts: Vec<String>,
+pub struct DnsCheckConfig {
+    host: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -171,10 +181,24 @@ pub(crate) fn test_app_state(
                 },
             },
             health: HealthConfig {
-                cache: HealthCacheConfig { ttl_seconds: 5 },
-                http: urls.map(|urls| HttpConfig { urls }),
-                dns: hosts.map(|hosts| DnsConfig { hosts }),
-                disk: disks,
+                config: HealthRuntimeConfig {
+                    cache_ttl_seconds: 5,
+                    http_timeout_seconds: 5,
+                },
+                checks: HealthChecksConfig {
+                    http: urls.map(|urls| {
+                        urls.into_iter()
+                            .map(|url| HttpCheckConfig { url, resolve: None })
+                            .collect()
+                    }),
+                    dns: hosts.map(|hosts| {
+                        hosts
+                            .into_iter()
+                            .map(|host| DnsCheckConfig { host })
+                            .collect()
+                    }),
+                    disk: disks,
+                },
             },
         },
     }
@@ -229,20 +253,31 @@ mod tests {
                 cert_path = "certs/localhost.crt.pem"
                 key_path = "certs/localhost.key.pem"
 
-                [health.http]
-                urls = ["https://example.com", "https://example.org"]
+                [health.config]
+                cache_ttl_seconds = 10
+                http_timeout_seconds = 5
 
-                [health.cache]
-                ttl_seconds = 10
+                [[health.checks.http]]
+                url = "https://example.com"
 
-                [health.dns]
-                hosts = ["localhost", "example.com"]
+                [[health.checks.http]]
+                url = "https://example.org"
 
-                [[health.disk]]
+                [[health.checks.http]]
+                url = "https://internal.example.com/health"
+                resolve = "10.0.0.5"
+
+                [[health.checks.dns]]
+                host = "localhost"
+
+                [[health.checks.dns]]
+                host = "example.com"
+
+                [[health.checks.disk]]
                 path = "/"
                 threshold = 20
 
-                [[health.disk]]
+                [[health.checks.disk]]
                 path = "/tmp"
                 threshold = 10
             "#,
@@ -258,19 +293,32 @@ mod tests {
             config.server.tls.key_path,
             PathBuf::from("certs/localhost.key.pem")
         );
-        assert_eq!(config.health.http.as_ref().unwrap().urls.len(), 2);
+        assert_eq!(config.health.config.cache_ttl_seconds, 10);
+        assert_eq!(config.health.config.http_timeout_seconds, 5);
+        assert_eq!(config.health.checks.http.as_ref().unwrap().len(), 3);
         assert_eq!(
-            config.health.http.as_ref().unwrap().urls[0],
+            config.health.checks.http.as_ref().unwrap()[0].url,
             "https://example.com"
         );
-        assert_eq!(config.health.cache.ttl_seconds, 10);
-        assert_eq!(config.health.dns.as_ref().unwrap().hosts.len(), 2);
-        assert_eq!(config.health.dns.as_ref().unwrap().hosts[0], "localhost");
-        assert_eq!(config.health.disk.as_ref().unwrap().len(), 2);
+        assert_eq!(config.health.checks.http.as_ref().unwrap()[0].resolve, None);
         assert_eq!(
-            config.health.disk.as_ref().unwrap()[0].path,
+            config.health.checks.http.as_ref().unwrap()[2].url,
+            "https://internal.example.com/health"
+        );
+        assert_eq!(
+            config.health.checks.http.as_ref().unwrap()[2].resolve,
+            Some("10.0.0.5".parse().unwrap())
+        );
+        assert_eq!(config.health.checks.dns.as_ref().unwrap().len(), 2);
+        assert_eq!(
+            config.health.checks.dns.as_ref().unwrap()[0].host,
+            "localhost"
+        );
+        assert_eq!(config.health.checks.disk.as_ref().unwrap().len(), 2);
+        assert_eq!(
+            config.health.checks.disk.as_ref().unwrap()[0].path,
             PathBuf::from("/")
         );
-        assert_eq!(config.health.disk.as_ref().unwrap()[0].threshold, 20);
+        assert_eq!(config.health.checks.disk.as_ref().unwrap()[0].threshold, 20);
     }
 }

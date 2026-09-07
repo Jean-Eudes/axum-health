@@ -10,7 +10,7 @@ use std::time::Duration;
 use crate::{AppState, health};
 
 pub(crate) fn app(state: AppState) -> Router {
-    let health_cache = health_response_cache(state.config.health.cache.ttl_seconds);
+    let health_cache = health_response_cache(state.config.health.config.cache_ttl_seconds);
 
     Router::new()
         .route("/actuator", get(actuator_root))

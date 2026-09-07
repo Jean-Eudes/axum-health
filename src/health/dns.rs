@@ -14,9 +14,9 @@ pub(super) struct DnsHealthCheck {
 }
 
 impl DnsHealthCheck {
-    pub(super) fn new(config: &crate::DnsConfig) -> Self {
+    pub(super) fn new(config: &[crate::DnsCheckConfig]) -> Self {
         Self {
-            hosts: config.hosts.clone(),
+            hosts: config.iter().map(|check| check.host.clone()).collect(),
         }
     }
 }

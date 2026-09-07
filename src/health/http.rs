@@ -1,6 +1,7 @@
 use futures::FutureExt;
 use futures::future::{BoxFuture, join_all};
 use serde::Serialize;
+use std::{net::SocketAddr, time::Duration};
 
 use super::{ComponentHealth, HealthCheck};
 
@@ -11,14 +12,32 @@ struct HttpDetails {
 
 pub(super) struct HttpHealthCheck {
     client: reqwest::Client,
-    urls: Vec<String>,
+    checks: Vec<HttpTarget>,
+    timeout: Duration,
+}
+
+#[derive(Debug, Clone)]
+struct HttpTarget {
+    url: String,
+    resolve: Option<std::net::IpAddr>,
 }
 
 impl HttpHealthCheck {
-    pub(super) fn new(client: &reqwest::Client, config: &crate::HttpConfig) -> Self {
+    pub(super) fn new(
+        client: &reqwest::Client,
+        checks: &[crate::HttpCheckConfig],
+        timeout_seconds: u64,
+    ) -> Self {
         Self {
             client: client.clone(),
-            urls: config.urls.clone(),
+            checks: checks
+                .iter()
+                .map(|check| HttpTarget {
+                    url: check.url.clone(),
+                    resolve: check.resolve,
+                })
+                .collect(),
+            timeout: Duration::from_secs(timeout_seconds),
         }
     }
 }
@@ -30,35 +49,58 @@ impl HealthCheck for HttpHealthCheck {
 
     fn check(&self) -> BoxFuture<'static, ComponentHealth> {
         let client = self.client.clone();
-        let urls = self.urls.clone();
+        let checks = self.checks.clone();
+        let timeout = self.timeout;
 
         async move {
-            let results = join_all(urls.into_iter().map(|url| {
+            let results = join_all(checks.into_iter().map(|target| {
                 let client = client.clone();
 
                 async move {
+                    let url = target.url;
                     if let Some(result) = mock_check(&url) {
                         return result;
                     }
 
-                    match client.get(&url).send().await {
-                        Ok(response) if response.status().is_success() => HttpCheck {
+                    let client = match client_for_target(&client, &url, target.resolve) {
+                        Ok(client) => client,
+                        Err(error) => {
+                            return HttpCheck {
+                                url,
+                                status: "DOWN",
+                                http_status: None,
+                                error: Some(error),
+                            };
+                        }
+                    };
+
+                    match tokio::time::timeout(timeout, client.get(&url).send()).await {
+                        Err(_) => HttpCheck {
+                            url,
+                            status: "DOWN",
+                            http_status: None,
+                            error: Some(format!(
+                                "request timed out after {} seconds",
+                                timeout.as_secs()
+                            )),
+                        },
+                        Ok(Err(err)) => HttpCheck {
+                            url,
+                            status: "DOWN",
+                            http_status: None,
+                            error: Some(err.to_string()),
+                        },
+                        Ok(Ok(response)) if response.status().is_success() => HttpCheck {
                             url,
                             status: "UP",
                             http_status: Some(response.status().as_u16()),
                             error: None,
                         },
-                        Ok(response) => HttpCheck {
+                        Ok(Ok(response)) => HttpCheck {
                             url,
                             status: "DOWN",
                             http_status: Some(response.status().as_u16()),
                             error: None,
-                        },
-                        Err(err) => HttpCheck {
-                            url,
-                            status: "DOWN",
-                            http_status: None,
-                            error: Some(err.to_string()),
                         },
                     }
                 }
@@ -77,6 +119,30 @@ impl HealthCheck for HttpHealthCheck {
         }
         .boxed()
     }
+}
+
+fn client_for_target(
+    client: &reqwest::Client,
+    url: &str,
+    resolve: Option<std::net::IpAddr>,
+) -> Result<reqwest::Client, String> {
+    let Some(resolve) = resolve else {
+        return Ok(client.clone());
+    };
+
+    let parsed = reqwest::Url::parse(url).map_err(|err| err.to_string())?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "URL has no hostname".to_string())?;
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| "URL has no known default port".to_string())?;
+    let address = SocketAddr::new(resolve, port);
+
+    reqwest::Client::builder()
+        .resolve(host, address)
+        .build()
+        .map_err(|err| err.to_string())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -112,4 +178,32 @@ fn mock_check(url: &str) -> Option<HttpCheck> {
             error: Some(format!("unsupported mock url: {url}")),
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::client_for_target;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn resolved_client_accepts_hostname_and_ip_override() {
+        let client = reqwest::Client::new();
+        assert!(
+            client_for_target(
+                &client,
+                "https://internal.example.com/health",
+                Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn resolved_client_rejects_invalid_url() {
+        let client = reqwest::Client::new();
+        assert!(
+            client_for_target(&client, "not a url", Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),)
+                .is_err()
+        );
+    }
 }
