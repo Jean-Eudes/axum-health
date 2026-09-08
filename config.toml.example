@@ -17,6 +17,10 @@ url = "https://aol.com"
 
 [[health.checks.http]]
 url = "https://internal.example.com/health"
+resolve = "internal.example.net"
+
+[[health.checks.http]]
+url = "https://another-internal.example.com/health"
 resolve = "10.0.0.5"
 
 [[health.checks.dns]]

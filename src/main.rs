@@ -4,7 +4,7 @@ mod resources;
 use serde::Deserialize;
 use std::{
     env, fs,
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -65,7 +65,7 @@ pub struct HealthChecksConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct HttpCheckConfig {
     url: String,
-    resolve: Option<IpAddr>,
+    resolve: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -307,7 +307,7 @@ mod tests {
         );
         assert_eq!(
             config.health.checks.http.as_ref().unwrap()[2].resolve,
-            Some("10.0.0.5".parse().unwrap())
+            Some("10.0.0.5".to_string())
         );
         assert_eq!(config.health.checks.dns.as_ref().unwrap().len(), 2);
         assert_eq!(

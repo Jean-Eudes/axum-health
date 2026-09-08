@@ -1,7 +1,10 @@
 use futures::FutureExt;
 use futures::future::{BoxFuture, join_all};
 use serde::Serialize;
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::{IpAddr, SocketAddr},
+    time::Duration,
+};
 
 use super::{ComponentHealth, HealthCheck};
 
@@ -19,7 +22,7 @@ pub(super) struct HttpHealthCheck {
 #[derive(Debug, Clone)]
 struct HttpTarget {
     url: String,
-    resolve: Option<std::net::IpAddr>,
+    resolve: Option<String>,
 }
 
 impl HttpHealthCheck {
@@ -34,7 +37,7 @@ impl HttpHealthCheck {
                 .iter()
                 .map(|check| HttpTarget {
                     url: check.url.clone(),
-                    resolve: check.resolve,
+                    resolve: check.resolve.clone(),
                 })
                 .collect(),
             timeout: Duration::from_secs(timeout_seconds),
@@ -62,17 +65,18 @@ impl HealthCheck for HttpHealthCheck {
                         return result;
                     }
 
-                    let client = match client_for_target(&client, &url, target.resolve) {
-                        Ok(client) => client,
-                        Err(error) => {
-                            return HttpCheck {
-                                url,
-                                status: "DOWN",
-                                http_status: None,
-                                error: Some(error),
-                            };
-                        }
-                    };
+                    let client =
+                        match client_for_target(&client, &url, target.resolve.as_deref()).await {
+                            Ok(client) => client,
+                            Err(error) => {
+                                return HttpCheck {
+                                    url,
+                                    status: "DOWN",
+                                    http_status: None,
+                                    error: Some(error),
+                                };
+                            }
+                        };
 
                     match tokio::time::timeout(timeout, client.get(&url).send()).await {
                         Err(_) => HttpCheck {
@@ -121,10 +125,10 @@ impl HealthCheck for HttpHealthCheck {
     }
 }
 
-fn client_for_target(
+async fn client_for_target(
     client: &reqwest::Client,
     url: &str,
-    resolve: Option<std::net::IpAddr>,
+    resolve: Option<&str>,
 ) -> Result<reqwest::Client, String> {
     let Some(resolve) = resolve else {
         return Ok(client.clone());
@@ -137,10 +141,21 @@ fn client_for_target(
     let port = parsed
         .port_or_known_default()
         .ok_or_else(|| "URL has no known default port".to_string())?;
-    let address = SocketAddr::new(resolve, port);
+    let addresses = if let Ok(ip) = resolve.parse::<IpAddr>() {
+        vec![SocketAddr::new(ip, port)]
+    } else {
+        tokio::net::lookup_host((resolve, port))
+            .await
+            .map_err(|err| format!("failed to resolve {resolve}: {err}"))?
+            .collect()
+    };
+
+    if addresses.is_empty() {
+        return Err(format!("failed to resolve {resolve}: no addresses found"));
+    }
 
     reqwest::Client::builder()
-        .resolve(host, address)
+        .resolve_to_addrs(host, &addresses)
         .build()
         .map_err(|err| err.to_string())
 }
@@ -183,27 +198,56 @@ fn mock_check(url: &str) -> Option<HttpCheck> {
 #[cfg(test)]
 mod tests {
     use super::client_for_target;
-    use std::net::{IpAddr, Ipv4Addr};
 
-    #[test]
-    fn resolved_client_accepts_hostname_and_ip_override() {
+    #[tokio::test]
+    async fn resolved_client_accepts_ip_override() {
         let client = reqwest::Client::new();
         assert!(
             client_for_target(
                 &client,
                 "https://internal.example.com/health",
-                Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                Some("127.0.0.1"),
             )
+            .await
             .is_ok()
         );
     }
 
-    #[test]
-    fn resolved_client_rejects_invalid_url() {
+    #[tokio::test]
+    async fn resolved_client_accepts_hostname_override() {
         let client = reqwest::Client::new();
         assert!(
-            client_for_target(&client, "not a url", Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),)
+            client_for_target(
+                &client,
+                "https://internal.example.com/health",
+                Some("localhost")
+            )
+            .await
+            .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_client_rejects_invalid_url() {
+        let client = reqwest::Client::new();
+        assert!(
+            client_for_target(&client, "not a url", Some("127.0.0.1"))
+                .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_client_rejects_unresolvable_hostname() {
+        let client = reqwest::Client::new();
+        assert!(
+            client_for_target(
+                &client,
+                "https://internal.example.com/health",
+                Some("does-not-exist.invalid"),
+            )
+            .await
+            .is_err()
         );
     }
 }
