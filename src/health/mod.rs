@@ -8,6 +8,7 @@ use crate::{AppState, HealthConfig};
 mod disk;
 mod dns;
 mod http;
+mod ping;
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct HealthResponse {
@@ -80,7 +81,7 @@ async fn collect_components(
 }
 
 fn configured_checks(health: &HealthConfig, client: &reqwest::Client) -> Vec<Box<dyn HealthCheck>> {
-    let mut checks: Vec<Box<dyn HealthCheck>> = Vec::new();
+    let mut checks: Vec<Box<dyn HealthCheck>> = vec![Box::new(ping::PingHealthCheck)];
 
     if let Some(http) = &health.checks.http {
         checks.push(Box::new(http::HttpHealthCheck::new(
@@ -161,7 +162,7 @@ mod tests {
             .unwrap();
 
         let expected = format!(
-            r#"{{"status":"DOWN","components":{{"disk":{{"status":"UP","details":{{"disks":[]}}}},"dns":{{"status":"UP","details":{{"hosts":[]}}}},"http":{{"status":"DOWN","details":{{"urls":[{{"url":"{ok_url}","status":"UP","http_status":200}},{{"url":"{down_url}","status":"DOWN","http_status":503}}]}}}}}}}}"#
+            r#"{{"status":"DOWN","components":{{"disk":{{"status":"UP","details":{{"disks":[]}}}},"dns":{{"status":"UP","details":{{"hosts":[]}}}},"http":{{"status":"DOWN","details":{{"urls":[{{"url":"{ok_url}","status":"UP","http_status":200}},{{"url":"{down_url}","status":"DOWN","http_status":503}}]}}}},"ping":{{"status":"UP","details":{{}}}}}}}}"#
         );
 
         assert_eq!(body.as_ref(), expected.as_bytes());
@@ -278,13 +279,35 @@ mod tests {
         assert_eq!(body.as_ref(), br#"{"status":"UP"}"#);
     }
 
+    #[tokio::test]
+    async fn health_endpoint_always_reports_ping_as_up() {
+        let response = resources::app(test_app_state(None, None, None))
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/actuator/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            body.as_ref(),
+            br#"{"status":"UP","components":{"ping":{"status":"UP","details":{}}}}"#
+        );
+    }
+
     #[test]
     fn configured_checks_only_include_present_sections() {
         let state = test_app_state(Some(vec!["mock://up".to_string()]), None, Some(vec![]));
         let checks = configured_checks(&state.config.health, &state.client);
         let names: Vec<_> = checks.iter().map(|check| check.name()).collect();
 
-        assert_eq!(names, vec!["http", "disk"]);
+        assert_eq!(names, vec!["ping", "http", "disk"]);
     }
 
     fn test_health_cache(ttl: Duration) -> Cache<u8, HealthResponse> {
