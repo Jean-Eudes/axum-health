@@ -66,7 +66,9 @@ impl HealthCheck for HttpHealthCheck {
                     }
 
                     let client =
-                        match client_for_target(&client, &url, target.resolve.as_deref()).await {
+                        match client_for_target(&client, &url, target.resolve.as_deref(), timeout)
+                            .await
+                        {
                             Ok(client) => client,
                             Err(error) => {
                                 return HttpCheck {
@@ -78,8 +80,8 @@ impl HealthCheck for HttpHealthCheck {
                             }
                         };
 
-                    match tokio::time::timeout(timeout, client.get(&url).send()).await {
-                        Err(_) => HttpCheck {
+                    match client.get(&url).send().await {
+                        Err(err) if err.is_timeout() => HttpCheck {
                             url,
                             status: "DOWN",
                             http_status: None,
@@ -88,19 +90,19 @@ impl HealthCheck for HttpHealthCheck {
                                 timeout.as_secs()
                             )),
                         },
-                        Ok(Err(err)) => HttpCheck {
+                        Err(err) => HttpCheck {
                             url,
                             status: "DOWN",
                             http_status: None,
                             error: Some(err.to_string()),
                         },
-                        Ok(Ok(response)) if response.status().is_success() => HttpCheck {
+                        Ok(response) if response.status().is_success() => HttpCheck {
                             url,
                             status: "UP",
                             http_status: Some(response.status().as_u16()),
                             error: None,
                         },
-                        Ok(Ok(response)) => HttpCheck {
+                        Ok(response) => HttpCheck {
                             url,
                             status: "DOWN",
                             http_status: Some(response.status().as_u16()),
@@ -129,6 +131,7 @@ async fn client_for_target(
     client: &reqwest::Client,
     url: &str,
     resolve: Option<&str>,
+    timeout: Duration,
 ) -> Result<reqwest::Client, String> {
     let Some(resolve) = resolve else {
         return Ok(client.clone());
@@ -155,6 +158,7 @@ async fn client_for_target(
     }
 
     reqwest::Client::builder()
+        .timeout(timeout)
         .resolve_to_addrs(host, &addresses)
         .build()
         .map_err(|err| err.to_string())
@@ -198,6 +202,7 @@ fn mock_check(url: &str) -> Option<HttpCheck> {
 #[cfg(test)]
 mod tests {
     use super::client_for_target;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn resolved_client_accepts_ip_override() {
@@ -207,6 +212,7 @@ mod tests {
                 &client,
                 "https://internal.example.com/health",
                 Some("127.0.0.1"),
+                Duration::from_secs(5),
             )
             .await
             .is_ok()
@@ -220,7 +226,8 @@ mod tests {
             client_for_target(
                 &client,
                 "https://internal.example.com/health",
-                Some("localhost")
+                Some("localhost"),
+                Duration::from_secs(5),
             )
             .await
             .is_ok()
@@ -231,9 +238,14 @@ mod tests {
     async fn resolved_client_rejects_invalid_url() {
         let client = reqwest::Client::new();
         assert!(
-            client_for_target(&client, "not a url", Some("127.0.0.1"))
-                .await
-                .is_err()
+            client_for_target(
+                &client,
+                "not a url",
+                Some("127.0.0.1"),
+                Duration::from_secs(5),
+            )
+            .await
+            .is_err()
         );
     }
 
@@ -245,6 +257,7 @@ mod tests {
                 &client,
                 "https://internal.example.com/health",
                 Some("does-not-exist.invalid"),
+                Duration::from_secs(5),
             )
             .await
             .is_err()

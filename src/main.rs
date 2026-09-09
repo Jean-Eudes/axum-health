@@ -7,6 +7,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 use tokio::net::TcpListener;
 use tokio_rustls::{
@@ -97,7 +98,7 @@ async fn main() {
     let port = config.server.port;
     let tls = load_tls_acceptor(&config.server.tls);
     let state = AppState {
-        client: reqwest::Client::new(),
+        client: build_http_client(config.health.config.http_timeout_seconds),
         config,
     };
 
@@ -115,6 +116,13 @@ async fn main() {
     axum::serve(listener, app)
         .await
         .expect("server exited unexpectedly");
+}
+
+fn build_http_client(timeout_seconds: u64) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_seconds))
+        .build()
+        .expect("failed to build HTTP client")
 }
 
 fn load_config(path: impl AsRef<Path>) -> Config {
@@ -170,37 +178,39 @@ pub(crate) fn test_app_state(
     hosts: Option<Vec<String>>,
     disks: Option<Vec<DiskConfig>>,
 ) -> AppState {
-    AppState {
-        client: reqwest::Client::new(),
-        config: Config {
-            server: ServerConfig {
-                port: 3000,
-                tls: TlsConfig {
-                    cert_path: "certs/localhost.crt.pem".into(),
-                    key_path: "certs/localhost.key.pem".into(),
-                },
-            },
-            health: HealthConfig {
-                config: HealthRuntimeConfig {
-                    cache_ttl_seconds: 5,
-                    http_timeout_seconds: 5,
-                },
-                checks: HealthChecksConfig {
-                    http: urls.map(|urls| {
-                        urls.into_iter()
-                            .map(|url| HttpCheckConfig { url, resolve: None })
-                            .collect()
-                    }),
-                    dns: hosts.map(|hosts| {
-                        hosts
-                            .into_iter()
-                            .map(|host| DnsCheckConfig { host })
-                            .collect()
-                    }),
-                    disk: disks,
-                },
+    let config = Config {
+        server: ServerConfig {
+            port: 3000,
+            tls: TlsConfig {
+                cert_path: "certs/localhost.crt.pem".into(),
+                key_path: "certs/localhost.key.pem".into(),
             },
         },
+        health: HealthConfig {
+            config: HealthRuntimeConfig {
+                cache_ttl_seconds: 5,
+                http_timeout_seconds: 5,
+            },
+            checks: HealthChecksConfig {
+                http: urls.map(|urls| {
+                    urls.into_iter()
+                        .map(|url| HttpCheckConfig { url, resolve: None })
+                        .collect()
+                }),
+                dns: hosts.map(|hosts| {
+                    hosts
+                        .into_iter()
+                        .map(|host| DnsCheckConfig { host })
+                        .collect()
+                }),
+                disk: disks,
+            },
+        },
+    };
+
+    AppState {
+        client: build_http_client(config.health.config.http_timeout_seconds),
+        config,
     }
 }
 
