@@ -221,23 +221,27 @@ impl axum::serve::Listener for TlsListener {
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
         loop {
             let (stream, addr) = match self.listener.accept().await {
-                Ok(connection) => connection,
+                Ok(conn) => conn,
                 Err(err) => {
-                    eprintln!("accept error: {err}");
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    tracing::error!(%err, "Erreur TCP accept");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 }
             };
 
             if let Err(err) = stream.set_nodelay(true) {
-                eprintln!("failed to enable TCP_NODELAY on {addr}: {err}");
+                tracing::warn!(%addr, %err, "Impossible d'activer TCP_NODELAY");
             }
 
-            match self.acceptor.accept(stream).await {
+            let acceptor = self.acceptor.clone();
+
+            // On effectue le handshake sans bloquer la boucle d'acceptation TCP principale
+            match acceptor.accept(stream).await {
                 Ok(tls_stream) => return (tls_stream, addr),
                 Err(err) => {
-                    eprintln!("TLS accept error from {addr}: {err}");
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    // Échec du handshake (ex: certificat invalide côté client, port scan)
+                    // On log et on repasse immédiatement à la connexion suivante sans sleep
+                    tracing::debug!(%addr, %err, "Échec du handshake TLS");
                 }
             }
         }

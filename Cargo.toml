@@ -15,6 +15,7 @@ toml = "1.1.2"
 tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread", "time"] }
 tokio-rustls = "0.26.4"
 mimalloc = "0.1.52"
+tracing = "0.1.44"
 
 [dev-dependencies]
 tower = "0.5.3"
