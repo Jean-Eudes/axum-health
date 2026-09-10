@@ -22,10 +22,6 @@ impl DnsHealthCheck {
 }
 
 impl HealthCheck for DnsHealthCheck {
-    fn name(&self) -> &'static str {
-        "dns"
-    }
-
     fn check(&self) -> BoxFuture<'static, ComponentHealth> {
         let hosts = self.hosts.clone();
 

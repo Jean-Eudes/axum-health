@@ -18,15 +18,16 @@ pub(crate) struct HealthResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct ComponentHealth {
+pub(crate) struct ComponentHealth {
     status: &'static str,
     details: serde_json::Value,
 }
 
-trait HealthCheck: Send + Sync {
-    fn name(&self) -> &'static str;
+pub(crate) trait HealthCheck: Send + Sync {
     fn check(&self) -> BoxFuture<'static, ComponentHealth>;
 }
+
+pub(crate) type HealthChecks = BTreeMap<&'static str, Box<dyn HealthCheck>>;
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Link {
@@ -48,7 +49,7 @@ pub(crate) struct ActuatorLinks {
 }
 
 pub(crate) async fn aggregate_response(state: AppState) -> HealthResponse {
-    let components = collect_components(&state.config.health, &state.client).await;
+    let components = collect_components(&state.checks).await;
 
     let overall_status = if components
         .values()
@@ -65,38 +66,39 @@ pub(crate) async fn aggregate_response(state: AppState) -> HealthResponse {
     }
 }
 
-async fn collect_components(
-    health: &HealthConfig,
-    client: &reqwest::Client,
-) -> BTreeMap<&'static str, ComponentHealth> {
-    let checks = configured_checks(health, client);
-    let components = join_all(checks.into_iter().map(|check| async move {
-        let name = check.name();
+async fn collect_components(checks: &HealthChecks) -> BTreeMap<&'static str, ComponentHealth> {
+    let components = join_all(checks.iter().map(|(name, check)| async move {
         let component = check.check().await;
-        (name, component)
+        (*name, component)
     }))
     .await;
 
     components.into_iter().collect()
 }
 
-fn configured_checks(health: &HealthConfig, client: &reqwest::Client) -> Vec<Box<dyn HealthCheck>> {
-    let mut checks: Vec<Box<dyn HealthCheck>> = vec![Box::new(ping::PingHealthCheck)];
+pub(crate) fn build_checks(health: &HealthConfig, client: &reqwest::Client) -> HealthChecks {
+    let mut checks = BTreeMap::from([(
+        "ping",
+        Box::new(ping::PingHealthCheck) as Box<dyn HealthCheck>,
+    )]);
 
     if let Some(http) = &health.checks.http {
-        checks.push(Box::new(http::HttpHealthCheck::new(
-            client,
-            http,
-            health.config.http_timeout_seconds,
-        )));
+        checks.insert(
+            "http",
+            Box::new(http::HttpHealthCheck::new(
+                client,
+                http,
+                health.config.http_timeout_seconds,
+            )),
+        );
     }
 
     if let Some(dns) = &health.checks.dns {
-        checks.push(Box::new(dns::DnsHealthCheck::new(dns)));
+        checks.insert("dns", Box::new(dns::DnsHealthCheck::new(dns)));
     }
 
     if let Some(disks) = &health.checks.disk {
-        checks.push(Box::new(disk::DiskHealthCheck::new(disks)));
+        checks.insert("disk", Box::new(disk::DiskHealthCheck::new(disks)));
     }
 
     checks
@@ -118,7 +120,7 @@ pub async fn readiness() -> Json<HealthResponse> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HealthResponse, configured_checks};
+    use super::{HealthResponse, build_checks};
     use crate::{DiskConfig, resources, test_app_state};
     use axum::{body::Body, http::StatusCode};
     use moka::future::Cache;
@@ -304,10 +306,11 @@ mod tests {
     #[test]
     fn configured_checks_only_include_present_sections() {
         let state = test_app_state(Some(vec!["mock://up".to_string()]), None, Some(vec![]));
-        let checks = configured_checks(&state.config.health, &state.client);
-        let names: Vec<_> = checks.iter().map(|check| check.name()).collect();
+        let client = crate::build_http_client(state.config.health.config.http_timeout_seconds);
+        let checks = build_checks(&state.config.health, &client);
+        let names: Vec<_> = checks.keys().copied().collect();
 
-        assert_eq!(names, vec!["ping", "http", "disk"]);
+        assert_eq!(names, vec!["disk", "http", "ping"]);
     }
 
     fn test_health_cache(ttl: Duration) -> Cache<u8, HealthResponse> {

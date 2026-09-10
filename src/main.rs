@@ -80,10 +80,10 @@ pub struct DiskConfig {
     threshold: u8,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AppState {
-    client: reqwest::Client,
     config: Config,
+    checks: Arc<health::HealthChecks>,
 }
 
 struct TlsListener {
@@ -97,8 +97,10 @@ async fn main() {
     let config = load_config(config_path);
     let port = config.server.port;
     let tls = load_tls_acceptor(&config.server.tls);
+    let client = build_http_client(config.health.config.http_timeout_seconds);
+    let checks = health::build_checks(&config.health, &client);
     let state = AppState {
-        client: build_http_client(config.health.config.http_timeout_seconds),
+        checks: Arc::new(checks),
         config,
     };
 
@@ -208,8 +210,11 @@ pub(crate) fn test_app_state(
         },
     };
 
+    let client = build_http_client(config.health.config.http_timeout_seconds);
+    let checks = health::build_checks(&config.health, &client);
+
     AppState {
-        client: build_http_client(config.health.config.http_timeout_seconds),
+        checks: Arc::new(checks),
         config,
     }
 }

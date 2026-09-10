@@ -46,10 +46,6 @@ impl HttpHealthCheck {
 }
 
 impl HealthCheck for HttpHealthCheck {
-    fn name(&self) -> &'static str {
-        "http"
-    }
-
     fn check(&self) -> BoxFuture<'static, ComponentHealth> {
         let client = self.client.clone();
         let checks = self.checks.clone();

@@ -23,10 +23,6 @@ impl DiskHealthCheck {
 }
 
 impl HealthCheck for DiskHealthCheck {
-    fn name(&self) -> &'static str {
-        "disk"
-    }
-
     fn check(&self) -> BoxFuture<'static, ComponentHealth> {
         let disks = self.disks.clone();
 
