@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 axum = "0.8.9"
 futures = "0.3.32"
+ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-ring"] }
 libc = "0.2.186"
 moka = { version = "0.12.15", features = ["future"] }
 reqwest = { version = "0.13.4", features = ["json"] }

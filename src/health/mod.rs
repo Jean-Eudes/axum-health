@@ -8,6 +8,7 @@ use crate::{AppState, HealthConfig};
 mod disk;
 mod dns;
 mod http;
+mod ldap;
 mod ping;
 
 #[derive(Debug, Clone, Serialize)]
@@ -101,6 +102,16 @@ pub(crate) fn build_checks(health: &HealthConfig, client: &reqwest::Client) -> H
         checks.insert("disk", Box::new(disk::DiskHealthCheck::new(disks)));
     }
 
+    if let Some(ldap) = &health.checks.ldap {
+        checks.insert(
+            "ldap",
+            Box::new(ldap::LdapHealthCheck::new(
+                ldap,
+                health.config.ldap_timeout_seconds,
+            )),
+        );
+    }
+
     checks
 }
 
@@ -125,7 +136,6 @@ mod tests {
     use axum::{body::Body, http::StatusCode};
     use moka::future::Cache;
     use std::{
-        future::Future,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -317,15 +327,11 @@ mod tests {
         Cache::builder().time_to_live(ttl).max_capacity(1).build()
     }
 
-    fn next_health_response(
-        calls: Arc<AtomicUsize>,
-    ) -> impl Future<Output = HealthResponse> + Send + 'static {
-        async move {
-            let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
-            HealthResponse {
-                status: if call == 1 { "UP" } else { "DOWN" },
-                components: None,
-            }
+    async fn next_health_response(calls: Arc<AtomicUsize>) -> HealthResponse {
+        let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+        HealthResponse {
+            status: if call == 1 { "UP" } else { "DOWN" },
+            components: None,
         }
     }
 

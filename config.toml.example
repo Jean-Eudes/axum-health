@@ -8,6 +8,12 @@ key_path = "certs/localhost.key.pem"
 [health.config]
 cache_ttl_seconds = 5
 http_timeout_seconds = 5
+ldap_timeout_seconds = 5
+
+[[health.checks.ldap]]
+url = "ldaps://ldap.example.com:636"
+bind_dn = "cn=healthcheck,ou=svc,dc=example,dc=com"
+password = "change-me"
 
 [[health.checks.http]]
 url = "https://www.google.fr"

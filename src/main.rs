@@ -51,6 +51,12 @@ pub struct HealthConfig {
 pub struct HealthRuntimeConfig {
     cache_ttl_seconds: u64,
     http_timeout_seconds: u64,
+    #[serde(default = "default_ldap_timeout_seconds")]
+    ldap_timeout_seconds: u64,
+}
+
+fn default_ldap_timeout_seconds() -> u64 {
+    5
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -61,6 +67,8 @@ pub struct HealthChecksConfig {
     dns: Option<Vec<DnsCheckConfig>>,
     #[serde(default)]
     disk: Option<Vec<DiskConfig>>,
+    #[serde(default)]
+    ldap: Option<Vec<LdapCheckConfig>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -80,6 +88,13 @@ pub struct DiskConfig {
     threshold: u8,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct LdapCheckConfig {
+    url: String,
+    bind_dn: String,
+    password: String,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     config: Config,
@@ -93,6 +108,10 @@ struct TlsListener {
 
 #[tokio::main]
 async fn main() {
+    // ldap3 et tokio-rustls peuvent activer Rustls sans sélectionner automatiquement
+    // un provider lorsque plusieurs dépendances partagent la même version de Rustls.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let config_path = env::var("AXUM_HEALTH_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
     let config = load_config(config_path);
     let port = config.server.port;
@@ -192,6 +211,7 @@ pub(crate) fn test_app_state(
             config: HealthRuntimeConfig {
                 cache_ttl_seconds: 5,
                 http_timeout_seconds: 5,
+                ldap_timeout_seconds: 5,
             },
             checks: HealthChecksConfig {
                 http: urls.map(|urls| {
@@ -206,6 +226,7 @@ pub(crate) fn test_app_state(
                         .collect()
                 }),
                 disk: disks,
+                ldap: None,
             },
         },
     };
@@ -275,6 +296,7 @@ mod tests {
                 [health.config]
                 cache_ttl_seconds = 10
                 http_timeout_seconds = 5
+                ldap_timeout_seconds = 5
 
                 [[health.checks.http]]
                 url = "https://example.com"
@@ -314,6 +336,7 @@ mod tests {
         );
         assert_eq!(config.health.config.cache_ttl_seconds, 10);
         assert_eq!(config.health.config.http_timeout_seconds, 5);
+        assert_eq!(config.health.config.ldap_timeout_seconds, 5);
         assert_eq!(config.health.checks.http.as_ref().unwrap().len(), 3);
         assert_eq!(
             config.health.checks.http.as_ref().unwrap()[0].url,
