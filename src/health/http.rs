@@ -129,6 +129,7 @@ async fn client_for_target(
     resolve: Option<&str>,
     timeout: Duration,
 ) -> Result<reqwest::Client, String> {
+    crate::ensure_rustls_ring_provider();
     let Some(resolve) = resolve else {
         return Ok(client.clone());
     };
@@ -200,8 +201,12 @@ mod tests {
     use super::client_for_target;
     use std::time::Duration;
 
+    // `ensure` doit précéder `Client::new()` : sans cela, `Client::new()`
+    // auto-installerait le provider via `from_crate_features` avant notre
+    // `OnceLock`, et l'`ensure` suivant paniquerait à tort (conflit apparent).
     #[tokio::test]
     async fn resolved_client_accepts_ip_override() {
+        crate::ensure_rustls_ring_provider();
         let client = reqwest::Client::new();
         assert!(
             client_for_target(
@@ -217,6 +222,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolved_client_accepts_hostname_override() {
+        crate::ensure_rustls_ring_provider();
         let client = reqwest::Client::new();
         assert!(
             client_for_target(
@@ -232,6 +238,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolved_client_rejects_invalid_url() {
+        crate::ensure_rustls_ring_provider();
         let client = reqwest::Client::new();
         assert!(
             client_for_target(
@@ -247,6 +254,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolved_client_rejects_unresolvable_hostname() {
+        crate::ensure_rustls_ring_provider();
         let client = reqwest::Client::new();
         assert!(
             client_for_target(

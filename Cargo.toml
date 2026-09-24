@@ -9,12 +9,12 @@ futures = "0.3.32"
 ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-ring"] }
 libc = "0.2.186"
 moka = { version = "0.12.15", features = ["future"] }
-reqwest = { version = "0.13.4", features = ["json"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "http2", "charset", "system-proxy", "rustls-no-provider"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 toml = "1.1.2"
 tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread", "time"] }
-tokio-rustls = "0.26.4"
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12", "logging"] }
 mimalloc = "0.1.52"
 tracing = "0.1.44"
 

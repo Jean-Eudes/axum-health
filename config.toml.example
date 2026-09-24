@@ -11,6 +11,10 @@ http_timeout_seconds = 5
 ldap_timeout_seconds = 5
 
 [[health.checks.ldap]]
+# Against the local test slapd, use url = "ldaps://127.0.0.1:636" with
+# bind_dn = "cn=admin,dc=example,dc=org" (password "admin"), and trust its CA
+# via .opencode/ldap-trust-bundle.sh
+# (export SSL_CERT_FILE=/tmp/opencode/ldap-test/ca-bundle.crt).
 url = "ldaps://ldap.example.com:636"
 bind_dn = "cn=healthcheck,ou=svc,dc=example,dc=com"
 password = "change-me"

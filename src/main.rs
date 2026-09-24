@@ -108,9 +108,11 @@ struct TlsListener {
 
 #[tokio::main]
 async fn main() {
-    // ldap3 et tokio-rustls peuvent activer Rustls sans sélectionner automatiquement
-    // un provider lorsque plusieurs dépendances partagent la même version de Rustls.
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    // Un seul provider Rustls (ring) est activé dans Cargo.toml
+    // (ldap3 tls-rustls-ring + reqwest rustls-no-provider + tokio-rustls ring).
+    // L'installation explicite échoue vite (panic) si le graphe réintroduit
+    // un second provider déjà installé avant nous.
+    ensure_rustls_ring_provider();
 
     let config_path = env::var("AXUM_HEALTH_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
     let config = load_config(config_path);
@@ -140,10 +142,31 @@ async fn main() {
 }
 
 fn build_http_client(timeout_seconds: u64) -> reqwest::Client {
+    ensure_rustls_ring_provider();
     reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_seconds))
         .build()
         .expect("failed to build HTTP client")
+}
+
+pub(crate) fn ensure_rustls_ring_provider() {
+    use std::sync::OnceLock;
+
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        // `install_default` n'échoue que si un autre provider a déjà été installé
+        // (par ex. auto-install via `get_default_or_install_from_crate_features`
+        // avant notre premier appel). Avec un seul provider compilé (ring),
+        // c'est une régression du graphe : échouer vite plutôt que continuer
+        // silencieusement avec le mauvais provider. Les appels suivants sont
+        // no-op via `OnceLock` et ne paniquent pas.
+        if let Err(existing) = rustls::crypto::ring::default_provider().install_default() {
+            panic!(
+                "conflit de provider Rustls : ring non installé ({} cipher suites déjà installées)",
+                existing.cipher_suites.len()
+            );
+        }
+    });
 }
 
 fn load_config(path: impl AsRef<Path>) -> Config {

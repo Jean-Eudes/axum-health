@@ -67,6 +67,7 @@ impl HealthCheck for LdapHealthCheck {
 }
 
 async fn check_server(server: LdapTarget, timeout: Duration) -> LdapCheck {
+    crate::ensure_rustls_ring_provider();
     let url = server.url.clone();
     let check_url = url.clone();
     let connection_url = url.clone();
