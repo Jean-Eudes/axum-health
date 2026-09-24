@@ -18,6 +18,12 @@ pub(crate) struct HealthResponse {
     components: Option<BTreeMap<&'static str, ComponentHealth>>,
 }
 
+impl HealthResponse {
+    pub(crate) fn status(&self) -> &'static str {
+        self.status
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ComponentHealth {
     status: &'static str,
@@ -160,7 +166,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             response
                 .headers()
@@ -199,7 +205,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -236,7 +242,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -302,6 +308,8 @@ mod tests {
             )
             .await
             .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
 
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await

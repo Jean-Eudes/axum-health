@@ -1,6 +1,6 @@
 use axum::{
     Router,
-    http::{HeaderValue, header},
+    http::{HeaderValue, StatusCode, header},
     response::IntoResponse,
     routing::get,
 };
@@ -27,7 +27,14 @@ pub(crate) fn app(state: AppState) -> Router {
                             .get_with(0, async move { health::aggregate_response(state).await })
                             .await;
 
-                        axum::Json(response)
+                        // Convention Spring : 200 si UP, 503 sinon.
+                        let status = if response.status() == "UP" {
+                            StatusCode::OK
+                        } else {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        };
+
+                        (status, axum::Json(response))
                     }
                 }
             }),
