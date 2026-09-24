@@ -36,3 +36,9 @@
 - Keep `config.toml.example` aligned with the runtime schema.
 - New health checks should fail closed: if a dependency cannot be checked, report `DOWN` in the aggregated health response.
 - If you add more parallel checks, keep an eye on outbound load and prefer bounded concurrency when the input list can grow large.
+
+## Test LDAP Service
+- Definition: `.opencode/podman.json` (service `ldap`), entrypoint `.opencode/ldap-entry.sh`.
+- Launch sequence (order matters): first run `./.opencode/ldap-host-prepare.sh` to create the host bind-mount sources (podman fails with 125 otherwise), then call `run_ldap` with `name: "ldap-test"` so `podman exec`/logs/commands stay stable across relaunches.
+- LDAPS trust: the container entrypoint generates a local test CA (`Test LDAP CA`, 3-day validity) at `/tmp/opencode/ldap-test/simple-certs/ca.crt`. `ldap3` verifies LDAPS against the OS trust store via `rustls-native-certs`, which does not contain this CA, so run `./.opencode/ldap-trust-bundle.sh` after the first boot to build `/tmp/opencode/ldap-test/ca-bundle.crt` (system roots + test CA) and launch the server with `SSL_CERT_FILE=/tmp/opencode/ldap-test/ca-bundle.crt`. Re-run the script whenever the CA is regenerated (expiry or wiped certs volume). TLS verification stays enabled (fail-closed).
+- Credentials: `cn=admin,dc=example,dc=org` / `admin`, suffix `dc=example,dc=org`. The entrypoint auto-seeds `dc=example,dc=org` + `ou=users` via offline `slapadd` when the DB is empty, and skips seeding when `data.mdb` already exists.
