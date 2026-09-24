@@ -9,14 +9,6 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::net::TcpListener;
-use tokio_rustls::{
-    TlsAcceptor,
-    rustls::{
-        self,
-        pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
-    },
-};
 
 use mimalloc::MiMalloc;
 
@@ -101,15 +93,11 @@ pub struct AppState {
     checks: Arc<health::HealthChecks>,
 }
 
-struct TlsListener {
-    listener: TcpListener,
-    acceptor: TlsAcceptor,
-}
-
 #[tokio::main]
 async fn main() {
     // Un seul provider Rustls (ring) est activé dans Cargo.toml
-    // (ldap3 tls-rustls-ring + reqwest rustls-no-provider + tokio-rustls ring).
+    // (rustls/ring + ldap3 tls-rustls-ring + reqwest rustls-no-provider
+    // + axum-server tls-rustls-no-provider sans provider).
     // L'installation explicite échoue vite (panic) si le graphe réintroduit
     // un second provider déjà installé avant nous.
     ensure_rustls_ring_provider();
@@ -117,9 +105,10 @@ async fn main() {
     let config_path = env::var("AXUM_HEALTH_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
     let config = load_config(config_path);
     let port = config.server.port;
-    let tls = load_tls_acceptor(&config.server.tls);
     let client = build_http_client(config.health.config.http_timeout_seconds);
     let checks = health::build_checks(&config.health, &client);
+    let cert_path = config.server.tls.cert_path.clone();
+    let key_path = config.server.tls.key_path.clone();
     let state = AppState {
         checks: Arc::new(checks),
         config,
@@ -128,15 +117,12 @@ async fn main() {
     let app = resources::app(state);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
-    let listener = TcpListener::bind(addr)
+    let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path)
         .await
-        .expect("failed to bind TCP listener");
-    let listener = TlsListener {
-        listener,
-        acceptor: tls,
-    };
+        .expect("failed to load TLS config");
 
-    axum::serve(listener, app)
+    axum_server::bind_rustls(addr, tls)
+        .serve(app.into_make_service())
         .await
         .expect("server exited unexpectedly");
 }
@@ -176,44 +162,6 @@ fn load_config(path: impl AsRef<Path>) -> Config {
 
     toml::from_str(&raw)
         .unwrap_or_else(|err| panic!("failed to parse config file {}: {err}", path.display()))
-}
-
-fn load_tls_acceptor(config: &TlsConfig) -> TlsAcceptor {
-    let certs = load_certificates(&config.cert_path);
-    let key = load_private_key(&config.key_path);
-
-    let mut server_config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .unwrap_or_else(|err| {
-            panic!(
-                "failed to build TLS config from {} and {}: {err}",
-                config.cert_path.display(),
-                config.key_path.display()
-            )
-        });
-    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-
-    TlsAcceptor::from(Arc::new(server_config))
-}
-
-fn load_certificates(path: impl AsRef<Path>) -> Vec<CertificateDer<'static>> {
-    let path = path.as_ref();
-    let raw = fs::read(path)
-        .unwrap_or_else(|err| panic!("failed to read certificate file {}: {err}", path.display()));
-
-    CertificateDer::pem_slice_iter(&raw)
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap_or_else(|err| panic!("failed to parse certificate file {}: {err}", path.display()))
-}
-
-fn load_private_key(path: impl AsRef<Path>) -> PrivateKeyDer<'static> {
-    let path = path.as_ref();
-    let file = fs::File::open(path)
-        .unwrap_or_else(|err| panic!("failed to read private key file {}: {err}", path.display()));
-
-    PrivateKeyDer::from_pem_reader(file)
-        .unwrap_or_else(|err| panic!("failed to parse private key file {}: {err}", path.display()))
 }
 
 #[cfg(test)]
@@ -260,44 +208,6 @@ pub(crate) fn test_app_state(
     AppState {
         checks: Arc::new(checks),
         config,
-    }
-}
-
-impl axum::serve::Listener for TlsListener {
-    type Io = tokio_rustls::server::TlsStream<tokio::net::TcpStream>;
-    type Addr = SocketAddr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        loop {
-            let (stream, addr) = match self.listener.accept().await {
-                Ok(conn) => conn,
-                Err(err) => {
-                    tracing::error!(%err, "Erreur TCP accept");
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
-                }
-            };
-
-            if let Err(err) = stream.set_nodelay(true) {
-                tracing::warn!(%addr, %err, "Impossible d'activer TCP_NODELAY");
-            }
-
-            let acceptor = self.acceptor.clone();
-
-            // On effectue le handshake sans bloquer la boucle d'acceptation TCP principale
-            match acceptor.accept(stream).await {
-                Ok(tls_stream) => return (tls_stream, addr),
-                Err(err) => {
-                    // Échec du handshake (ex: certificat invalide côté client, port scan)
-                    // On log et on repasse immédiatement à la connexion suivante sans sleep
-                    tracing::debug!(%addr, %err, "Échec du handshake TLS");
-                }
-            }
-        }
-    }
-
-    fn local_addr(&self) -> std::io::Result<Self::Addr> {
-        self.listener.local_addr()
     }
 }
 
