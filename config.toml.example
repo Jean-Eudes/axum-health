@@ -1,3 +1,7 @@
+# Exemple de configuration. Copier vers config.toml (non versionné, voir .gitignore).
+# Attention : /actuator et /actuator/health exposent les cibles surveillées
+# (URLs, hôtes, chemins disque, URLs LDAP) et les messages d'erreur associés.
+# N'exposer ces endpoints que sur un réseau de confiance.
 [server]
 port = 3000
 
