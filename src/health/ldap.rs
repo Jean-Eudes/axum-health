@@ -95,9 +95,11 @@ async fn check_server(server: LdapTarget, timeout: Duration) -> LdapCheck {
             .success()
             .map_err(|err| err.to_string());
 
-        let unbind_result = ldap.unbind().await;
+        let unbind_result = ldap.with_timeout(timeout).unbind().await;
         bind_result?;
-        unbind_result.map_err(|err| err.to_string())?;
+        if let Err(err) = unbind_result {
+            tracing::debug!(%err, "LDAP unbind failed after successful bind");
+        }
         Ok::<(), String>(())
     }
     .await;
