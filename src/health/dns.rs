@@ -49,12 +49,15 @@ impl HealthCheck for DnsHealthCheck {
                             }
                         }
                     }
-                    Err(err) => DnsCheck {
-                        host,
-                        status: "DOWN",
-                        addresses: None,
-                        error: Some(err.to_string()),
-                    },
+                    Err(err) => {
+                        tracing::debug!(host = %host, %err, "DNS resolution failed");
+                        DnsCheck {
+                            host,
+                            status: "DOWN",
+                            addresses: None,
+                            error: Some(err.to_string()),
+                        }
+                    }
                 }
             }))
             .await;

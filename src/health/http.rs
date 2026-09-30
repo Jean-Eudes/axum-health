@@ -67,6 +67,7 @@ impl HealthCheck for HttpHealthCheck {
                         {
                             Ok(client) => client,
                             Err(error) => {
+                                tracing::debug!(url = %url, %error, "HTTP override client failed");
                                 return HttpCheck {
                                     url,
                                     status: "DOWN",
@@ -87,10 +88,13 @@ impl HealthCheck for HttpHealthCheck {
                             )),
                         },
                         Err(err) => HttpCheck {
-                            url,
+                            url: url.clone(),
                             status: "DOWN",
                             http_status: None,
-                            error: Some(err.to_string()),
+                            error: Some({
+                                tracing::debug!(url = %url, %err, "HTTP request failed");
+                                err.to_string()
+                            }),
                         },
                         Ok(response) if response.status().is_success() => HttpCheck {
                             url,

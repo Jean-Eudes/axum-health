@@ -46,15 +46,18 @@ impl HealthCheck for DiskHealthCheck {
                             error: None,
                         }
                     }
-                    Err(err) => DiskCheck {
-                        path: disk.path.display().to_string(),
-                        status: "DOWN",
-                        total_bytes: None,
-                        available_bytes: None,
-                        percent_remaining: None,
-                        threshold: disk.threshold,
-                        error: Some(err.to_string()),
-                    },
+                    Err(err) => {
+                        tracing::debug!(path = %disk.path.display(), %err, "disk check failed");
+                        DiskCheck {
+                            path: disk.path.display().to_string(),
+                            status: "DOWN",
+                            total_bytes: None,
+                            available_bytes: None,
+                            percent_remaining: None,
+                            threshold: disk.threshold,
+                            error: Some(err.to_string()),
+                        }
+                    }
                 }
             }))
             .await;
