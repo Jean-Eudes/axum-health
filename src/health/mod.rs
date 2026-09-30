@@ -83,7 +83,7 @@ async fn collect_components(checks: &HealthChecks) -> BTreeMap<&'static str, Com
     components.into_iter().collect()
 }
 
-pub(crate) fn build_checks(health: &HealthConfig, client: &reqwest::Client) -> HealthChecks {
+pub(crate) fn build_checks(health: &HealthConfig) -> HealthChecks {
     let mut checks = BTreeMap::from([(
         "ping",
         Box::new(ping::PingHealthCheck) as Box<dyn HealthCheck>,
@@ -93,7 +93,6 @@ pub(crate) fn build_checks(health: &HealthConfig, client: &reqwest::Client) -> H
         checks.insert(
             "http",
             Box::new(http::HttpHealthCheck::new(
-                client,
                 http,
                 health.config.http_timeout_seconds,
             )),
@@ -324,8 +323,7 @@ mod tests {
     #[test]
     fn configured_checks_only_include_present_sections() {
         let state = test_app_state(Some(vec!["mock://up".to_string()]), None, Some(vec![]));
-        let client = crate::build_http_client(state.config.health.config.http_timeout_seconds);
-        let checks = build_checks(&state.config.health, &client);
+        let checks = build_checks(&state.config.health);
         let names: Vec<_> = checks.keys().copied().collect();
 
         assert_eq!(names, vec!["disk", "http", "ping"]);

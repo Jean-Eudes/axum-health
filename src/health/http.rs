@@ -2,7 +2,9 @@ use futures::FutureExt;
 use futures::future::{BoxFuture, join_all};
 use serde::Serialize;
 use std::{
+    collections::HashMap,
     net::{IpAddr, SocketAddr},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -14,7 +16,8 @@ struct HttpDetails {
 }
 
 pub(super) struct HttpHealthCheck {
-    client: reqwest::Client,
+    base: reqwest::Client,
+    resolve_clients: Arc<Mutex<HashMap<ResolveKey, ResolvedClient>>>,
     checks: Vec<HttpTarget>,
     timeout: Duration,
 }
@@ -25,35 +28,61 @@ struct HttpTarget {
     resolve: Option<String>,
 }
 
+/// Un client d'override est spécifique à un couple (hôte de l'URL, valeur de
+/// `resolve`) : deux cibles partageant la même clé partagent le même client et
+/// donc le même pool de connexions.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ResolveKey {
+    host: String,
+    resolve: String,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedClient {
+    addrs: Vec<SocketAddr>,
+    client: reqwest::Client,
+}
+
 impl HttpHealthCheck {
-    pub(super) fn new(
-        client: &reqwest::Client,
-        checks: &[crate::HttpCheckConfig],
-        timeout_seconds: u64,
-    ) -> Self {
+    pub(super) fn new(config: &[crate::HttpCheckConfig], timeout_seconds: u64) -> Self {
+        // `ClientBuilder` n'est pas `Clone` : impossible de dériver un client
+        // d'override depuis un `Client` déjà construit sans reconstruire un
+        // builder, donc sans hériter des réglages du client de base. On construit
+        // le client ici pour que les deux chemins (direct et `resolve`) partagent
+        // exactement la même configuration.
+        crate::ensure_rustls_ring_provider();
+        let timeout = Duration::from_secs(timeout_seconds);
+        let base = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .expect("failed to build base HTTP client");
+
         Self {
-            client: client.clone(),
-            checks: checks
+            base,
+            resolve_clients: Arc::new(Mutex::new(HashMap::new())),
+            checks: config
                 .iter()
                 .map(|check| HttpTarget {
                     url: check.url.clone(),
                     resolve: check.resolve.clone(),
                 })
                 .collect(),
-            timeout: Duration::from_secs(timeout_seconds),
+            timeout,
         }
     }
 }
 
 impl HealthCheck for HttpHealthCheck {
     fn check(&self) -> BoxFuture<'static, ComponentHealth> {
-        let client = self.client.clone();
+        let base = self.base.clone();
+        let resolve_clients = Arc::clone(&self.resolve_clients);
         let checks = self.checks.clone();
         let timeout = self.timeout;
 
         async move {
             let results = join_all(checks.into_iter().map(|target| {
-                let client = client.clone();
+                let base = base.clone();
+                let resolve_clients = Arc::clone(&resolve_clients);
 
                 async move {
                     let url = target.url;
@@ -61,21 +90,26 @@ impl HealthCheck for HttpHealthCheck {
                         return result;
                     }
 
-                    let client =
-                        match client_for_target(&client, &url, target.resolve.as_deref(), timeout)
-                            .await
-                        {
-                            Ok(client) => client,
-                            Err(error) => {
-                                tracing::debug!(url = %url, %error, "HTTP override client failed");
-                                return HttpCheck {
-                                    url,
-                                    status: "DOWN",
-                                    http_status: None,
-                                    error: Some(error),
-                                };
-                            }
-                        };
+                    let client = match client_for_target(
+                        &base,
+                        &resolve_clients,
+                        &url,
+                        target.resolve.as_deref(),
+                        timeout,
+                    )
+                    .await
+                    {
+                        Ok(client) => client,
+                        Err(error) => {
+                            tracing::debug!(url = %url, %error, "HTTP override client failed");
+                            return HttpCheck {
+                                url,
+                                status: "DOWN",
+                                http_status: None,
+                                error: Some(error),
+                            };
+                        }
+                    };
 
                     match client.get(&url).send().await {
                         Err(err) if err.is_timeout() => HttpCheck {
@@ -146,42 +180,93 @@ async fn drain_body(response: &mut reqwest::Response) -> Result<(), reqwest::Err
     Ok(())
 }
 
+/// Résout le client à utiliser pour une cible.
+///
+/// Sans `resolve`, c'est le client de base (un `Arc::clone`, coût nul).
+/// Avec `resolve`, le client est mis en cache par couple (hôte, `resolve`) et
+/// n'est reconstruit que si la résolution change : construire un client coûte
+/// ~40 ms de chargement du trust store (verifier de plateforme / racines), et ce
+/// chargement est de l'I/O bloquant dans une tâche async. La résolution, elle,
+/// reste faite à chaque check : c'est elle qui permet le failover DNS.
 async fn client_for_target(
-    client: &reqwest::Client,
+    base: &reqwest::Client,
+    resolve_clients: &Mutex<HashMap<ResolveKey, ResolvedClient>>,
     url: &str,
     resolve: Option<&str>,
     timeout: Duration,
 ) -> Result<reqwest::Client, String> {
     crate::ensure_rustls_ring_provider();
     let Some(resolve) = resolve else {
-        return Ok(client.clone());
+        return Ok(base.clone());
     };
 
     let parsed = reqwest::Url::parse(url).map_err(|err| err.to_string())?;
     let host = parsed
         .host_str()
-        .ok_or_else(|| "URL has no hostname".to_string())?;
+        .ok_or_else(|| "URL has no hostname".to_string())?
+        .to_ascii_lowercase();
     let port = parsed
         .port_or_known_default()
         .ok_or_else(|| "URL has no known default port".to_string())?;
-    let addresses = if let Ok(ip) = resolve.parse::<IpAddr>() {
+    let addresses = normalize_addresses(if let Ok(ip) = resolve.parse::<IpAddr>() {
         vec![SocketAddr::new(ip, port)]
     } else {
         tokio::net::lookup_host((resolve, port))
             .await
             .map_err(|err| format!("failed to resolve {resolve}: {err}"))?
             .collect()
-    };
+    });
 
     if addresses.is_empty() {
         return Err(format!("failed to resolve {resolve}: no addresses found"));
     }
 
+    let key = ResolveKey {
+        host,
+        resolve: resolve.to_string(),
+    };
+
+    // Aucun await pendant le lock : std::sync::Mutex, pas tokio::sync::Mutex.
+    let mut cache = resolve_clients
+        .lock()
+        .expect("HTTP resolve client cache is never poisoned");
+
+    if let Some(cached) = cache.get(&key)
+        && cached.addrs == addresses
+    {
+        return Ok(cached.client.clone());
+    }
+
+    let client = override_client(&key.host, &addresses, timeout)?;
+    cache.insert(
+        key,
+        ResolvedClient {
+            addrs: addresses,
+            client: client.clone(),
+        },
+    );
+
+    Ok(client)
+}
+
+fn override_client(
+    host: &str,
+    addresses: &[SocketAddr],
+    timeout: Duration,
+) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(timeout)
-        .resolve_to_addrs(host, &addresses)
+        .resolve_to_addrs(host, addresses)
         .build()
         .map_err(|err| err.to_string())
+}
+
+/// Tri + dédup : la comparaison avec l'entrée du cache doit être insensible à
+/// l'ordre, sinon un DNS round-robin invaliderait le client à chaque check.
+fn normalize_addresses(mut addresses: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    addresses.sort();
+    addresses.dedup();
+    addresses
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -224,9 +309,10 @@ mod tests {
     use super::{HttpHealthCheck, client_for_target};
     use crate::{HttpCheckConfig, health::HealthCheck};
     use std::{
+        collections::HashMap,
         net::SocketAddr,
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
@@ -243,6 +329,7 @@ mod tests {
         assert!(
             client_for_target(
                 &client,
+                &resolve_clients(),
                 "https://internal.example.com/health",
                 Some("127.0.0.1"),
                 Duration::from_secs(5),
@@ -259,6 +346,7 @@ mod tests {
         assert!(
             client_for_target(
                 &client,
+                &resolve_clients(),
                 "https://internal.example.com/health",
                 Some("localhost"),
                 Duration::from_secs(5),
@@ -275,6 +363,7 @@ mod tests {
         assert!(
             client_for_target(
                 &client,
+                &resolve_clients(),
                 "not a url",
                 Some("127.0.0.1"),
                 Duration::from_secs(5),
@@ -291,6 +380,7 @@ mod tests {
         assert!(
             client_for_target(
                 &client,
+                &resolve_clients(),
                 "https://internal.example.com/health",
                 Some("does-not-exist.invalid"),
                 Duration::from_secs(5),
@@ -303,11 +393,15 @@ mod tests {
     // Hypothèse des tests réseau ci-dessous : aucun `HTTP_PROXY` dans
     // l'environnement, sinon reqwest routerait la requête vers le proxy et le
     // serveur local ne verrait rien.
+    fn resolve_clients() -> Mutex<HashMap<super::ResolveKey, super::ResolvedClient>> {
+        Mutex::new(HashMap::new())
+    }
+
     fn check_for(config: &[HttpCheckConfig]) -> HttpHealthCheck {
         // `ensure` avant `Client::new()`, sinon le provider serait auto-installé
         // par `from_crate_features` et l'`ensure` suivant paniquerait.
         crate::ensure_rustls_ring_provider();
-        HttpHealthCheck::new(&reqwest::Client::new(), config, 5)
+        HttpHealthCheck::new(config, 5)
     }
 
     //
@@ -407,5 +501,57 @@ mod tests {
         // rétrograde pas le check en DOWN.
         assert_eq!(response.status, "UP");
         assert_eq!(response.details["urls"][0]["http_status"], 200);
+    }
+
+    #[tokio::test]
+    async fn resolve_override_reaches_the_configured_address() {
+        let (addr, requests, connections) =
+            spawn_counting_server(Arc::new(vec![b'x'; 1024 * 1024])).await;
+        // Hôte qui ne résout pas : seule l'override doit permettre d'atteindre
+        // le serveur local.
+        let check = check_for(&[HttpCheckConfig {
+            url: format!("http://internal.invalid:{}/", addr.port()),
+            resolve: Some("127.0.0.1".to_string()),
+        }]);
+
+        let response = check.check().await;
+
+        assert_eq!(response.status, "UP");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn override_client_is_cached_across_runs() {
+        let (addr, requests, connections) =
+            spawn_counting_server(Arc::new(vec![b'x'; 1024 * 1024])).await;
+        let check = check_for(&[HttpCheckConfig {
+            url: format!("http://internal.invalid:{}/", addr.port()),
+            resolve: Some("127.0.0.1".to_string()),
+        }]);
+
+        for _ in 0..3 {
+            let response = check.check().await;
+            assert_eq!(response.status, "UP");
+        }
+
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        // Sans cache, chaque check reconstruit un client (donc un pool vide) et
+        // ouvre une nouvelle connexion : 3 au lieu de 1.
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn addresses_are_normalized_before_cache_comparison() {
+        let first = SocketAddr::from(([10, 0, 0, 1], 443));
+        let second = SocketAddr::from(([10, 0, 0, 2], 443));
+
+        // Un DNS round-robin peut renvoyer les mêmes adresses dans un ordre
+        // différent, ou en répéter une : sans normalisation, le client caché
+        // serait invalidé et reconstruit à chaque check (~40 ms par cible).
+        assert_eq!(
+            super::normalize_addresses(vec![second, first, second]),
+            vec![first, second]
+        );
     }
 }
