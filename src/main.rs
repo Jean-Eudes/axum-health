@@ -84,7 +84,7 @@ pub struct DiskConfig {
 pub struct LdapCheckConfig {
     url: String,
     bind_dn: String,
-    password: String,
+    password: secrecy::SecretString,
 }
 
 #[derive(Clone)]
@@ -254,6 +254,11 @@ mod tests {
                 [[health.checks.disk]]
                 path = "/tmp"
                 threshold = 10
+
+                [[health.checks.ldap]]
+                url = "ldaps://ldap.example.com:636"
+                bind_dn = "cn=healthcheck,ou=svc,dc=example,dc=com"
+                password = "change-me"
             "#,
         )
         .unwrap();
@@ -295,5 +300,23 @@ mod tests {
             PathBuf::from("/")
         );
         assert_eq!(config.health.checks.disk.as_ref().unwrap()[0].threshold, 20);
+        assert_eq!(config.health.checks.ldap.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            config.health.checks.ldap.as_ref().unwrap()[0].url,
+            "ldaps://ldap.example.com:636"
+        );
+        assert_eq!(
+            config.health.checks.ldap.as_ref().unwrap()[0].bind_dn,
+            "cn=healthcheck,ou=svc,dc=example,dc=com"
+        );
+        assert_eq!(
+            secrecy::ExposeSecret::expose_secret(
+                &config.health.checks.ldap.as_ref().unwrap()[0].password
+            ),
+            "change-me"
+        );
+        assert!(
+            !format!("{:?}", config.health.checks.ldap.as_ref().unwrap()[0]).contains("change-me")
+        );
     }
 }

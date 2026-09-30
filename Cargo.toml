@@ -12,6 +12,7 @@ libc = "0.2.186"
 moka = { version = "0.12.15", features = ["future"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "http2", "charset", "system-proxy", "rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std", "logging"] }
+secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 toml = "1.1.2"

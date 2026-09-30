@@ -1,6 +1,7 @@
 use futures::FutureExt;
 use futures::future::{BoxFuture, join_all};
 use ldap3::{LdapConnAsync, LdapConnSettings};
+use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
 use std::time::Duration;
 
@@ -20,7 +21,7 @@ pub(super) struct LdapHealthCheck {
 struct LdapTarget {
     url: String,
     bind_dn: String,
-    password: String,
+    password: SecretString,
 }
 
 impl LdapHealthCheck {
@@ -79,7 +80,10 @@ async fn check_server(server: LdapTarget, timeout: Duration) -> LdapCheck {
         let settings = LdapConnSettings::new().set_conn_timeout(timeout);
         let (connection, mut ldap) = LdapConnAsync::with_settings(settings, &connection_url)
             .await
-            .map_err(|err| err.to_string())?;
+            .map_err(|err| {
+                tracing::debug!(%err, url = %connection_url, "LDAP connection failed");
+                err.to_string()
+            })?;
 
         tokio::spawn(async move {
             if let Err(err) = connection.drive().await {
@@ -89,11 +93,17 @@ async fn check_server(server: LdapTarget, timeout: Duration) -> LdapCheck {
 
         let bind_result = ldap
             .with_timeout(timeout)
-            .simple_bind(&server.bind_dn, &server.password)
+            .simple_bind(&server.bind_dn, server.password.expose_secret())
             .await
-            .map_err(|err| err.to_string())?
+            .map_err(|err| {
+                tracing::debug!(bind_dn = %server.bind_dn, url = %connection_url, %err, "LDAP bind failed");
+                err.to_string()
+            })?
             .success()
-            .map_err(|err| err.to_string());
+            .map_err(|err| {
+                tracing::debug!(bind_dn = %server.bind_dn, url = %connection_url, %err, "LDAP bind rejected");
+                err.to_string()
+            });
 
         let unbind_result = ldap.with_timeout(timeout).unbind().await;
         bind_result?;
@@ -129,6 +139,7 @@ struct LdapCheck {
 #[cfg(test)]
 mod tests {
     use super::{LdapHealthCheck, LdapTarget, check_server};
+    use secrecy::SecretString;
     use std::time::Duration;
 
     #[tokio::test]
@@ -137,7 +148,7 @@ mod tests {
             LdapTarget {
                 url: "ldap://localhost:389".to_string(),
                 bind_dn: "cn=healthcheck,dc=example,dc=com".to_string(),
-                password: "secret".to_string(),
+                password: SecretString::from("secret"),
             },
             Duration::from_secs(1),
         )
@@ -156,7 +167,7 @@ mod tests {
             LdapTarget {
                 url: "ldaps://localhost:636".to_string(),
                 bind_dn: "cn=healthcheck,dc=example,dc=com".to_string(),
-                password: "secret".to_string(),
+                password: SecretString::from("secret"),
             },
             Duration::from_secs(1),
         )
@@ -172,12 +183,12 @@ mod tests {
             crate::LdapCheckConfig {
                 url: "ldaps://ldap-one.example.com:636".to_string(),
                 bind_dn: "cn=healthcheck,dc=example,dc=com".to_string(),
-                password: "secret-one".to_string(),
+                password: SecretString::from("secret-one"),
             },
             crate::LdapCheckConfig {
                 url: "ldaps://ldap-two.example.com:636".to_string(),
                 bind_dn: "cn=healthcheck,dc=example,dc=com".to_string(),
-                password: "secret-two".to_string(),
+                password: SecretString::from("secret-two"),
             },
         ];
 
