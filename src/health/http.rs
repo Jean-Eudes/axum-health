@@ -2,7 +2,6 @@ use futures::FutureExt;
 use futures::future::{BoxFuture, join_all};
 use serde::Serialize;
 use std::{
-    collections::HashMap,
     net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
     time::Duration,
@@ -17,30 +16,18 @@ struct HttpDetails {
 
 pub(super) struct HttpHealthCheck {
     base: reqwest::Client,
-    resolve_clients: Arc<Mutex<HashMap<ResolveKey, ResolvedClient>>>,
-    checks: Vec<HttpTarget>,
+    // `Arc` : les cibles portent l'état de leur client d'override, qui doit
+    // survivre aux checks (et ne pas être re-copié à chaque requête).
+    targets: Arc<Vec<HttpTarget>>,
     timeout: Duration,
 }
 
-#[derive(Debug, Clone)]
 struct HttpTarget {
     url: String,
     resolve: Option<String>,
-}
-
-/// Un client d'override est spécifique à un couple (hôte de l'URL, valeur de
-/// `resolve`) : deux cibles partageant la même clé partagent le même client et
-/// donc le même pool de connexions.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ResolveKey {
-    host: String,
-    resolve: String,
-}
-
-#[derive(Debug, Clone)]
-struct ResolvedClient {
-    addrs: Vec<SocketAddr>,
-    client: reqwest::Client,
+    /// Client figé à la première résolution réussie, `None` tant que
+    /// l'override n'a pas pu être résolu.
+    client: Mutex<Option<reqwest::Client>>,
 }
 
 impl HttpHealthCheck {
@@ -59,14 +46,16 @@ impl HttpHealthCheck {
 
         Self {
             base,
-            resolve_clients: Arc::new(Mutex::new(HashMap::new())),
-            checks: config
-                .iter()
-                .map(|check| HttpTarget {
-                    url: check.url.clone(),
-                    resolve: check.resolve.clone(),
-                })
-                .collect(),
+            targets: Arc::new(
+                config
+                    .iter()
+                    .map(|check| HttpTarget {
+                        url: check.url.clone(),
+                        resolve: check.resolve.clone(),
+                        client: Mutex::new(None),
+                    })
+                    .collect(),
+            ),
             timeout,
         }
     }
@@ -75,30 +64,20 @@ impl HttpHealthCheck {
 impl HealthCheck for HttpHealthCheck {
     fn check(&self) -> BoxFuture<'static, ComponentHealth> {
         let base = self.base.clone();
-        let resolve_clients = Arc::clone(&self.resolve_clients);
-        let checks = self.checks.clone();
+        let targets = Arc::clone(&self.targets);
         let timeout = self.timeout;
 
         async move {
-            let results = join_all(checks.into_iter().map(|target| {
+            let results = join_all(targets.iter().map(|target| {
                 let base = base.clone();
-                let resolve_clients = Arc::clone(&resolve_clients);
 
                 async move {
-                    let url = target.url;
+                    let url = target.url.clone();
                     if let Some(result) = mock_check(&url) {
                         return result;
                     }
 
-                    let client = match client_for_target(
-                        &base,
-                        &resolve_clients,
-                        &url,
-                        target.resolve.as_deref(),
-                        timeout,
-                    )
-                    .await
-                    {
+                    let client = match client_for_target(&base, target, timeout).await {
                         Ok(client) => client,
                         Err(error) => {
                             tracing::debug!(url = %url, %error, "HTTP override client failed");
@@ -183,68 +162,65 @@ async fn drain_body(response: &mut reqwest::Response) -> Result<(), reqwest::Err
 /// Résout le client à utiliser pour une cible.
 ///
 /// Sans `resolve`, c'est le client de base (un `Arc::clone`, coût nul).
-/// Avec `resolve`, le client est mis en cache par couple (hôte, `resolve`) et
-/// n'est reconstruit que si la résolution change : construire un client coûte
-/// ~40 ms de chargement du trust store (verifier de plateforme / racines), et ce
-/// chargement est de l'I/O bloquant dans une tâche async. La résolution, elle,
-/// reste faite à chaque check : c'est elle qui permet le failover DNS.
+///
+/// Avec `resolve`, le client est construit **une seule fois**, à la première
+/// résolution réussie, puis figé : les adresses ne suivent plus les changements
+/// DNS du nom d'override (arbitrage assumé : un `resolve` est une cible de
+/// health check interne, pas un service à failover). Tant que la résolution
+/// échoue, le slot reste vide et le check réessaie au cycle suivant, ce qui évite
+/// qu'un incident DNS au démarrage fige la cible en échec.
+///
+/// Construire un client coûte ~40 ms de chargement du trust store (verifier de
+/// plateforme / racines), et ce chargement est de l'I/O bloquant dans une tâche
+/// async : d'où l'intérêt de le faire une fois, et non à chaque check.
 async fn client_for_target(
     base: &reqwest::Client,
-    resolve_clients: &Mutex<HashMap<ResolveKey, ResolvedClient>>,
-    url: &str,
-    resolve: Option<&str>,
+    target: &HttpTarget,
     timeout: Duration,
 ) -> Result<reqwest::Client, String> {
     crate::ensure_rustls_ring_provider();
-    let Some(resolve) = resolve else {
+    let Some(resolve) = target.resolve.as_deref() else {
         return Ok(base.clone());
     };
 
-    let parsed = reqwest::Url::parse(url).map_err(|err| err.to_string())?;
+    // Client déjà figé : c'est le chemin chaud, aucun await, aucun lock tenu.
+    let frozen = target
+        .client
+        .lock()
+        .expect("HTTP override client slot is never poisoned")
+        .clone();
+    if let Some(client) = frozen {
+        return Ok(client);
+    }
+
+    let parsed = reqwest::Url::parse(&target.url).map_err(|err| err.to_string())?;
     let host = parsed
         .host_str()
-        .ok_or_else(|| "URL has no hostname".to_string())?
-        .to_ascii_lowercase();
+        .ok_or_else(|| "URL has no hostname".to_string())?;
     let port = parsed
         .port_or_known_default()
         .ok_or_else(|| "URL has no known default port".to_string())?;
-    let addresses = normalize_addresses(if let Ok(ip) = resolve.parse::<IpAddr>() {
+    let addresses = if let Ok(ip) = resolve.parse::<IpAddr>() {
         vec![SocketAddr::new(ip, port)]
     } else {
         tokio::net::lookup_host((resolve, port))
             .await
             .map_err(|err| format!("failed to resolve {resolve}: {err}"))?
             .collect()
-    });
+    };
 
     if addresses.is_empty() {
         return Err(format!("failed to resolve {resolve}: no addresses found"));
     }
 
-    let key = ResolveKey {
-        host,
-        resolve: resolve.to_string(),
-    };
+    let client = override_client(host, &addresses, timeout)?;
 
-    // Aucun await pendant le lock : std::sync::Mutex, pas tokio::sync::Mutex.
-    let mut cache = resolve_clients
+    // Deux checks concurrents pourraient construire deux fois : sans conséquence
+    // (`get_with` sérialise l'agrégation), le dernier écrit gagne.
+    *target
+        .client
         .lock()
-        .expect("HTTP resolve client cache is never poisoned");
-
-    if let Some(cached) = cache.get(&key)
-        && cached.addrs == addresses
-    {
-        return Ok(cached.client.clone());
-    }
-
-    let client = override_client(&key.host, &addresses, timeout)?;
-    cache.insert(
-        key,
-        ResolvedClient {
-            addrs: addresses,
-            client: client.clone(),
-        },
-    );
+        .expect("HTTP override client slot is never poisoned") = Some(client.clone());
 
     Ok(client)
 }
@@ -259,14 +235,6 @@ fn override_client(
         .resolve_to_addrs(host, addresses)
         .build()
         .map_err(|err| err.to_string())
-}
-
-/// Tri + dédup : la comparaison avec l'entrée du cache doit être insensible à
-/// l'ordre, sinon un DNS round-robin invaliderait le client à chaque check.
-fn normalize_addresses(mut addresses: Vec<SocketAddr>) -> Vec<SocketAddr> {
-    addresses.sort();
-    addresses.dedup();
-    addresses
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -306,13 +274,12 @@ fn mock_check(url: &str) -> Option<HttpCheck> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HttpHealthCheck, client_for_target};
+    use super::{HttpHealthCheck, HttpTarget, client_for_target};
     use crate::{HttpCheckConfig, health::HealthCheck};
     use std::{
-        collections::HashMap,
         net::SocketAddr,
         sync::{
-            Arc, Mutex,
+            Arc,
             atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
@@ -329,9 +296,7 @@ mod tests {
         assert!(
             client_for_target(
                 &client,
-                &resolve_clients(),
-                "https://internal.example.com/health",
-                Some("127.0.0.1"),
+                &target("https://internal.example.com/health", Some("127.0.0.1")),
                 Duration::from_secs(5),
             )
             .await
@@ -346,9 +311,7 @@ mod tests {
         assert!(
             client_for_target(
                 &client,
-                &resolve_clients(),
-                "https://internal.example.com/health",
-                Some("localhost"),
+                &target("https://internal.example.com/health", Some("localhost")),
                 Duration::from_secs(5),
             )
             .await
@@ -363,9 +326,7 @@ mod tests {
         assert!(
             client_for_target(
                 &client,
-                &resolve_clients(),
-                "not a url",
-                Some("127.0.0.1"),
+                &target("not a url", Some("127.0.0.1")),
                 Duration::from_secs(5),
             )
             .await
@@ -380,9 +341,10 @@ mod tests {
         assert!(
             client_for_target(
                 &client,
-                &resolve_clients(),
-                "https://internal.example.com/health",
-                Some("does-not-exist.invalid"),
+                &target(
+                    "https://internal.example.com/health",
+                    Some("does-not-exist.invalid")
+                ),
                 Duration::from_secs(5),
             )
             .await
@@ -393,8 +355,12 @@ mod tests {
     // Hypothèse des tests réseau ci-dessous : aucun `HTTP_PROXY` dans
     // l'environnement, sinon reqwest routerait la requête vers le proxy et le
     // serveur local ne verrait rien.
-    fn resolve_clients() -> Mutex<HashMap<super::ResolveKey, super::ResolvedClient>> {
-        Mutex::new(HashMap::new())
+    fn target(url: &str, resolve: Option<&str>) -> HttpTarget {
+        HttpTarget {
+            url: url.to_string(),
+            resolve: resolve.map(str::to_string),
+            client: std::sync::Mutex::new(None),
+        }
     }
 
     fn check_for(config: &[HttpCheckConfig]) -> HttpHealthCheck {
@@ -522,7 +488,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn override_client_is_cached_across_runs() {
+    async fn override_client_is_built_once_across_runs() {
         let (addr, requests, connections) =
             spawn_counting_server(Arc::new(vec![b'x'; 1024 * 1024])).await;
         let check = check_for(&[HttpCheckConfig {
@@ -541,17 +507,38 @@ mod tests {
         assert_eq!(connections.load(Ordering::SeqCst), 1);
     }
 
-    #[test]
-    fn addresses_are_normalized_before_cache_comparison() {
-        let first = SocketAddr::from(([10, 0, 0, 1], 443));
-        let second = SocketAddr::from(([10, 0, 0, 2], 443));
+    #[tokio::test]
+    async fn failed_resolution_leaves_the_slot_empty_for_the_next_check() {
+        crate::ensure_rustls_ring_provider();
+        let base = reqwest::Client::new();
 
-        // Un DNS round-robin peut renvoyer les mêmes adresses dans un ordre
-        // différent, ou en répéter une : sans normalisation, le client caché
-        // serait invalidé et reconstruit à chaque check (~40 ms par cible).
-        assert_eq!(
-            super::normalize_addresses(vec![second, first, second]),
-            vec![first, second]
+        // Résolution impossible : le slot reste vide, donc le check réessaiera
+        // au cycle suivant au lieu de figer la cible en échec définitif.
+        let unresolvable = target(
+            "https://internal.example.com/health",
+            Some("does-not-exist.invalid"),
+        );
+        assert!(
+            client_for_target(&base, &unresolvable, Duration::from_secs(1))
+                .await
+                .is_err()
+        );
+        assert!(unresolvable.client.lock().unwrap().is_none());
+
+        // IP littérale : aucune résolution, le client est figé au premier check.
+        let frozen = target("https://internal.example.com/health", Some("127.0.0.1"));
+        assert!(
+            client_for_target(&base, &frozen, Duration::from_secs(1))
+                .await
+                .is_ok()
+        );
+        assert!(frozen.client.lock().unwrap().is_some());
+
+        // Un second appel ne reconstruit rien et ne ré-resout pas.
+        assert!(
+            client_for_target(&base, &frozen, Duration::from_secs(1))
+                .await
+                .is_ok()
         );
     }
 }
