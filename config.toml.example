@@ -29,13 +29,12 @@ url = "https://www.google.fr"
 [[health.checks.http]]
 url = "https://aol.com"
 
+# `resolve` accepte une IP ou un hostname à résoudre à la place du hostname de
+# l'URL. Le hostname de l'URL reste utilisé pour Host, SNI et la validation TLS :
+# le certificat doit donc toujours être valide pour internal.example.com.
 [[health.checks.http]]
 url = "https://internal.example.com/health"
 resolve = "internal.example.net"
-
-[[health.checks.http]]
-url = "https://another-internal.example.com/health"
-resolve = "10.0.0.5"
 
 [[health.checks.dns]]
 host = "localhost"

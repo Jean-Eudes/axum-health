@@ -22,27 +22,25 @@ impl DnsHealthCheck {
 }
 
 impl HealthCheck for DnsHealthCheck {
-    fn check(&self) -> BoxFuture<'static, ComponentHealth> {
-        let hosts = self.hosts.clone();
-
+    fn check(&self) -> BoxFuture<'_, ComponentHealth> {
         async move {
-            let results = join_all(hosts.into_iter().map(|host| async move {
-                let host_for_lookup = host.clone();
-                match tokio::net::lookup_host((host_for_lookup.as_str(), 0)).await {
+            let results = join_all(self.hosts.iter().map(|host| async move {
+                let host_for_lookup = host.as_str();
+                match tokio::net::lookup_host((host_for_lookup, 0)).await {
                     Ok(lookup) => {
                         let addresses: Vec<String> =
                             lookup.map(|addr| addr.ip().to_string()).collect();
 
                         if addresses.is_empty() {
                             DnsCheck {
-                                host,
+                                host: host.clone(),
                                 status: "DOWN",
                                 addresses: None,
                                 error: Some("no addresses resolved".to_string()),
                             }
                         } else {
                             DnsCheck {
-                                host,
+                                host: host.clone(),
                                 status: "UP",
                                 addresses: Some(addresses),
                                 error: None,
@@ -52,7 +50,7 @@ impl HealthCheck for DnsHealthCheck {
                     Err(err) => {
                         tracing::debug!(host = %host, %err, "DNS resolution failed");
                         DnsCheck {
-                            host,
+                            host: host.clone(),
                             status: "DOWN",
                             addresses: None,
                             error: Some(err.to_string()),

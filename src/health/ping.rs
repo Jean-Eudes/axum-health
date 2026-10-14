@@ -6,7 +6,7 @@ use super::{ComponentHealth, HealthCheck};
 pub(super) struct PingHealthCheck;
 
 impl HealthCheck for PingHealthCheck {
-    fn check(&self) -> BoxFuture<'static, ComponentHealth> {
+    fn check(&self) -> BoxFuture<'_, ComponentHealth> {
         async {
             ComponentHealth {
                 status: "UP",
