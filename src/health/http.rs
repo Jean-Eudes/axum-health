@@ -4,6 +4,7 @@ use serde::Serialize;
 use std::{
     collections::BTreeMap,
     net::{IpAddr, SocketAddr},
+    sync::Arc,
     time::Duration,
 };
 
@@ -33,18 +34,15 @@ impl HttpHealthCheck {
         let timeout = Duration::from_secs(timeout_seconds);
 
         Self {
-            // Un seul client pour toutes les cibles : son pool de connexions et
-            // son trust store sont chargés une fois, ici, au démarrage.
-            base: build_client(config, timeout).await,
+            base: build_client(config, timeout),
             targets: config.iter().map(|check| check.url.clone()).collect(),
             timeout,
         }
     }
 }
 
-async fn build_client(config: &[crate::HttpCheckConfig], timeout: Duration) -> reqwest::Client {
-    let mut builder = reqwest::Client::builder().timeout(timeout);
-    let mut mappings = BTreeMap::<String, Vec<SocketAddr>>::new();
+fn build_client(config: &[crate::HttpCheckConfig], timeout: Duration) -> reqwest::Client {
+    let mut overrides = BTreeMap::<String, String>::new();
 
     for check in config {
         let Some(resolve) = check.resolve.as_deref() else {
@@ -54,51 +52,75 @@ async fn build_client(config: &[crate::HttpCheckConfig], timeout: Duration) -> r
         // Seule la destination DNS est remplacée. L'URL garde son hostname pour
         // le Host HTTP, le SNI et la validation du certificat TLS.
         let host = url_host(&check.url);
-        let port = url_port(&check.url);
-        let mut addresses = if let Ok(ip) = resolve.parse::<IpAddr>() {
-            vec![SocketAddr::new(ip, 0)]
-        } else {
-            tokio::net::lookup_host((resolve, port))
-                .await
-                .unwrap_or_else(|err| {
-                    panic!(
-                        "failed to resolve HTTP check override {resolve:?} for {:?}: {err}",
-                        check.url
-                    )
-                })
-                .map(|addr| SocketAddr::new(addr.ip(), 0))
-                .collect()
-        };
-        addresses.sort_unstable();
-        addresses.dedup();
-        assert!(
-            !addresses.is_empty(),
-            "HTTP check override {resolve:?} for {:?} resolved to no addresses",
-            check.url
-        );
-
-        if let Some(previous) = mappings.get(&host) {
+        if let Some(previous) = overrides.get(&host) {
             assert_eq!(
-                previous, &addresses,
+                previous, resolve,
                 "conflicting resolve overrides for HTTP hostname {host:?}"
             );
         } else {
-            mappings.insert(host, addresses);
+            overrides.insert(host, resolve.to_string());
         }
     }
 
-    for (host, addresses) in mappings {
-        builder = builder.resolve_to_addrs(&host, &addresses);
-    }
-
-    builder.build().expect("failed to build HTTP client")
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .dns_resolver(Arc::new(OverrideResolver {
+            overrides,
+            cache: Arc::new(tokio::sync::RwLock::new(BTreeMap::new())),
+        }))
+        .build()
+        .expect("failed to build HTTP client")
 }
 
-fn url_port(url: &str) -> u16 {
-    reqwest::Url::parse(url)
-        .unwrap_or_else(|err| panic!("invalid health check url {url:?}: {err}"))
-        .port_or_known_default()
-        .unwrap_or_else(|| panic!("health check url {url:?} has no known port"))
+struct OverrideResolver {
+    overrides: BTreeMap<String, String>,
+    cache: Arc<tokio::sync::RwLock<BTreeMap<String, Vec<SocketAddr>>>>,
+}
+
+impl reqwest::dns::Resolve for OverrideResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        let target = self
+            .overrides
+            .get(&host)
+            .cloned()
+            .unwrap_or_else(|| host.clone());
+        let cache = Arc::clone(&self.cache);
+        let is_override = self.overrides.contains_key(&host);
+
+        Box::pin(async move {
+            if is_override && let Some(addresses) = cache.read().await.get(&host).cloned() {
+                return Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs);
+            }
+
+            let addresses = if let Ok(ip) = target.parse::<IpAddr>() {
+                vec![SocketAddr::new(ip, 0)]
+            } else {
+                tokio::net::lookup_host((target.as_str(), 0))
+                    .await
+                    .map_err(|err| {
+                        let message = if is_override {
+                            format!("failed to resolve HTTP check override {target:?} for {host:?}: {err}")
+                        } else {
+                            format!("failed to resolve HTTP host {host:?}: {err}")
+                        };
+                        std::io::Error::other(message)
+                    })?
+                    .map(|address| SocketAddr::new(address.ip(), 0))
+                    .collect::<Vec<_>>()
+            };
+            if addresses.is_empty() {
+                return Err(std::io::Error::other(format!(
+                    "DNS lookup for {target:?} returned no addresses"
+                ))
+                .into());
+            }
+            if is_override {
+                cache.write().await.insert(host, addresses.clone());
+            }
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
 }
 
 fn url_host(url: &str) -> String {
@@ -116,39 +138,43 @@ impl HealthCheck for HttpHealthCheck {
         // La future est empruntée à `self` (`BoxFuture<'_, _>`) : aucune donnée
         // n'est copiée ici, tout est lu par référence.
         async move {
-            let results = join_all(self.targets.iter().map(|target| async move {
-                let url = target.clone();
-                if let Some(result) = mock_check(&url) {
-                    return result;
-                }
+            let client = self.base.clone();
+            let results = join_all(self.targets.iter().map(|target| {
+                let client = client.clone();
+                async move {
+                    let url = target.clone();
+                    if let Some(result) = mock_check(&url) {
+                        return result;
+                    }
 
-                match self.base.get(&url).send().await {
-                    Err(err) if err.is_timeout() => HttpCheck {
-                        url,
-                        status: "DOWN",
-                        http_status: None,
-                        error: Some(format!(
-                            "request timed out after {} seconds",
-                            self.timeout.as_secs()
-                        )),
-                    },
-                    Err(err) => HttpCheck {
-                        url: url.clone(),
-                        status: "DOWN",
-                        http_status: None,
-                        error: Some({
-                            tracing::debug!(url = %url, %err, "HTTP request failed");
-                            err.to_string()
-                        }),
-                    },
-                    Ok(mut response) => {
-                        let status = response.status();
-                        drain(&mut response).await;
-                        HttpCheck {
+                    match client.get(&url).send().await {
+                        Err(err) if err.is_timeout() => HttpCheck {
                             url,
-                            status: if status.is_success() { "UP" } else { "DOWN" },
-                            http_status: Some(status.as_u16()),
-                            error: None,
+                            status: "DOWN",
+                            http_status: None,
+                            error: Some(format!(
+                                "request timed out after {} seconds",
+                                self.timeout.as_secs()
+                            )),
+                        },
+                        Err(err) => HttpCheck {
+                            url: url.clone(),
+                            status: "DOWN",
+                            http_status: None,
+                            error: Some({
+                                tracing::debug!(url = %url, %err, "HTTP request failed");
+                                err.to_string()
+                            }),
+                        },
+                        Ok(mut response) => {
+                            let status = response.status();
+                            drain(&mut response).await;
+                            HttpCheck {
+                                url,
+                                status: if status.is_success() { "UP" } else { "DOWN" },
+                                http_status: Some(status.as_u16()),
+                                error: None,
+                            }
                         }
                     }
                 }
@@ -452,13 +478,16 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "failed to resolve HTTP check override")]
-    async fn unresolved_hostname_override_fails_during_initialization() {
-        let _ = check_for(&[HttpCheckConfig {
+    async fn unresolved_hostname_override_reports_down_during_check() {
+        let check = check_for(&[HttpCheckConfig {
             url: "http://internal.invalid/".to_string(),
             resolve: Some("this-host-does-not-exist.invalid".to_string()),
         }])
         .await;
+
+        let response = check.check().await;
+        assert_eq!(response.status, "DOWN");
+        assert!(response.details["urls"][0]["error"].as_str().is_some());
     }
 
     #[tokio::test]
