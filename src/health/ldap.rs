@@ -41,15 +41,12 @@ impl LdapHealthCheck {
 }
 
 impl HealthCheck for LdapHealthCheck {
-    fn check(&self) -> BoxFuture<'static, ComponentHealth> {
-        let servers = self.servers.clone();
-        let timeout = self.timeout;
-
+    fn check(&self) -> BoxFuture<'_, ComponentHealth> {
         async move {
             let results = join_all(
-                servers
-                    .into_iter()
-                    .map(|server| check_server(server, timeout)),
+                self.servers
+                    .iter()
+                    .map(|server| check_server(server, self.timeout)),
             )
             .await;
 
@@ -67,21 +64,18 @@ impl HealthCheck for LdapHealthCheck {
     }
 }
 
-async fn check_server(server: LdapTarget, timeout: Duration) -> LdapCheck {
+async fn check_server(server: &LdapTarget, timeout: Duration) -> LdapCheck {
     crate::ensure_rustls_ring_provider();
-    let url = server.url.clone();
-    let check_url = url.clone();
-    let connection_url = url.clone();
     let result = async move {
-        if !check_url.starts_with("ldaps://") {
+        if !server.url.starts_with("ldaps://") {
             return Err("LDAP URL must use the ldaps:// scheme".to_string());
         }
 
         let settings = LdapConnSettings::new().set_conn_timeout(timeout);
-        let (connection, mut ldap) = LdapConnAsync::with_settings(settings, &connection_url)
+        let (connection, mut ldap) = LdapConnAsync::with_settings(settings, &server.url)
             .await
             .map_err(|err| {
-                tracing::debug!(%err, url = %connection_url, "LDAP connection failed");
+                tracing::debug!(%err, url = %server.url, "LDAP connection failed");
                 err.to_string()
             })?;
 
@@ -96,12 +90,12 @@ async fn check_server(server: LdapTarget, timeout: Duration) -> LdapCheck {
             .simple_bind(&server.bind_dn, server.password.expose_secret())
             .await
             .map_err(|err| {
-                tracing::debug!(bind_dn = %server.bind_dn, url = %connection_url, %err, "LDAP bind failed");
+                tracing::debug!(bind_dn = %server.bind_dn, url = %server.url, %err, "LDAP bind failed");
                 err.to_string()
             })?
             .success()
             .map_err(|err| {
-                tracing::debug!(bind_dn = %server.bind_dn, url = %connection_url, %err, "LDAP bind rejected");
+                tracing::debug!(bind_dn = %server.bind_dn, url = %server.url, %err, "LDAP bind rejected");
                 err.to_string()
             });
 
@@ -116,12 +110,12 @@ async fn check_server(server: LdapTarget, timeout: Duration) -> LdapCheck {
 
     match result {
         Ok(()) => LdapCheck {
-            url,
+            url: server.url.clone(),
             status: "UP",
             error: None,
         },
         Err(error) => LdapCheck {
-            url,
+            url: server.url.clone(),
             status: "DOWN",
             error: Some(error),
         },
@@ -144,15 +138,13 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_non_ldaps_urls() {
-        let result = check_server(
-            LdapTarget {
-                url: "ldap://localhost:389".to_string(),
-                bind_dn: "cn=healthcheck,dc=example,dc=com".to_string(),
-                password: SecretString::from("secret"),
-            },
-            Duration::from_secs(1),
-        )
-        .await;
+        let target = LdapTarget {
+            url: "ldap://localhost:389".to_string(),
+            bind_dn: "cn=healthcheck,dc=example,dc=com".to_string(),
+            password: SecretString::from("secret"),
+        };
+
+        let result = check_server(&target, Duration::from_secs(1)).await;
 
         assert_eq!(result.status, "DOWN");
         assert_eq!(
@@ -163,15 +155,13 @@ mod tests {
 
     #[tokio::test]
     async fn reports_connection_failure_without_exposing_password() {
-        let result = check_server(
-            LdapTarget {
-                url: "ldaps://localhost:636".to_string(),
-                bind_dn: "cn=healthcheck,dc=example,dc=com".to_string(),
-                password: SecretString::from("secret"),
-            },
-            Duration::from_secs(1),
-        )
-        .await;
+        let target = LdapTarget {
+            url: "ldaps://localhost:636".to_string(),
+            bind_dn: "cn=healthcheck,dc=example,dc=com".to_string(),
+            password: SecretString::from("secret"),
+        };
+
+        let result = check_server(&target, Duration::from_secs(1)).await;
 
         assert_eq!(result.status, "DOWN");
         assert!(!result.error.unwrap().contains("secret"));

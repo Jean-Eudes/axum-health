@@ -23,11 +23,9 @@ impl DiskHealthCheck {
 }
 
 impl HealthCheck for DiskHealthCheck {
-    fn check(&self) -> BoxFuture<'static, ComponentHealth> {
-        let disks = self.disks.clone();
-
+    fn check(&self) -> BoxFuture<'_, ComponentHealth> {
         async move {
-            let results = join_all(disks.into_iter().map(|disk| async move {
+            let results = join_all(self.disks.iter().map(|disk| async move {
                 match disk_usage_percent_remaining(&disk.path) {
                     Ok((total_bytes, available_bytes, percent_remaining)) => {
                         let status = if percent_remaining <= disk.threshold {

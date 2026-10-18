@@ -31,7 +31,7 @@ pub(crate) struct ComponentHealth {
 }
 
 pub(crate) trait HealthCheck: Send + Sync {
-    fn check(&self) -> BoxFuture<'static, ComponentHealth>;
+    fn check(&self) -> BoxFuture<'_, ComponentHealth>;
 }
 
 pub(crate) type HealthChecks = BTreeMap<&'static str, Box<dyn HealthCheck>>;
@@ -83,7 +83,7 @@ async fn collect_components(checks: &HealthChecks) -> BTreeMap<&'static str, Com
     components.into_iter().collect()
 }
 
-pub(crate) fn build_checks(health: &HealthConfig, client: &reqwest::Client) -> HealthChecks {
+pub(crate) async fn build_checks(health: &HealthConfig) -> HealthChecks {
     let mut checks = BTreeMap::from([(
         "ping",
         Box::new(ping::PingHealthCheck) as Box<dyn HealthCheck>,
@@ -92,11 +92,7 @@ pub(crate) fn build_checks(health: &HealthConfig, client: &reqwest::Client) -> H
     if let Some(http) = &health.checks.http {
         checks.insert(
             "http",
-            Box::new(http::HttpHealthCheck::new(
-                client,
-                http,
-                health.config.http_timeout_seconds,
-            )),
+            Box::new(http::HttpHealthCheck::new(http, health.config.http_timeout_seconds).await),
         );
     }
 
@@ -156,7 +152,7 @@ mod tests {
         let down_url = "mock://down".to_string();
         let urls = vec![ok_url.clone(), down_url.clone()];
 
-        let response = resources::app(test_app_state(Some(urls), Some(vec![]), Some(vec![])))
+        let response = resources::app(test_app_state(Some(urls), Some(vec![]), Some(vec![])).await)
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/actuator/health")
@@ -188,14 +184,17 @@ mod tests {
 
     #[tokio::test]
     async fn health_endpoint_reports_dns_resolution_statuses() {
-        let response = resources::app(test_app_state(
-            Some(vec![]),
-            Some(vec![
-                "localhost".to_string(),
-                "no-such-host.invalid".to_string(),
-            ]),
-            Some(vec![]),
-        ))
+        let response = resources::app(
+            test_app_state(
+                Some(vec![]),
+                Some(vec![
+                    "localhost".to_string(),
+                    "no-such-host.invalid".to_string(),
+                ]),
+                Some(vec![]),
+            )
+            .await,
+        )
         .oneshot(
             axum::http::Request::builder()
                 .uri("/actuator/health")
@@ -219,20 +218,23 @@ mod tests {
 
     #[tokio::test]
     async fn health_endpoint_reports_disk_statuses() {
-        let response = resources::app(test_app_state(
-            Some(vec![]),
-            Some(vec![]),
-            Some(vec![
-                DiskConfig {
-                    path: std::env::temp_dir(),
-                    threshold: 0,
-                },
-                DiskConfig {
-                    path: std::env::temp_dir(),
-                    threshold: 100,
-                },
-            ]),
-        ))
+        let response = resources::app(
+            test_app_state(
+                Some(vec![]),
+                Some(vec![]),
+                Some(vec![
+                    DiskConfig {
+                        path: std::env::temp_dir(),
+                        threshold: 0,
+                    },
+                    DiskConfig {
+                        path: std::env::temp_dir(),
+                        threshold: 100,
+                    },
+                ]),
+            )
+            .await,
+        )
         .oneshot(
             axum::http::Request::builder()
                 .uri("/actuator/health")
@@ -257,15 +259,16 @@ mod tests {
 
     #[tokio::test]
     async fn liveness_endpoint_stays_up() {
-        let response = resources::app(test_app_state(Some(vec![]), Some(vec![]), Some(vec![])))
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/actuator/health/liveness")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response =
+            resources::app(test_app_state(Some(vec![]), Some(vec![]), Some(vec![])).await)
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri("/actuator/health/liveness")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
 
@@ -278,15 +281,16 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_endpoint_stays_up() {
-        let response = resources::app(test_app_state(Some(vec![]), Some(vec![]), Some(vec![])))
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/actuator/health/readiness")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response =
+            resources::app(test_app_state(Some(vec![]), Some(vec![]), Some(vec![])).await)
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri("/actuator/health/readiness")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
 
@@ -299,7 +303,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_endpoint_always_reports_ping_as_up() {
-        let response = resources::app(test_app_state(None, None, None))
+        let response = resources::app(test_app_state(None, None, None).await)
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/actuator/health")
@@ -321,11 +325,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn configured_checks_only_include_present_sections() {
-        let state = test_app_state(Some(vec!["mock://up".to_string()]), None, Some(vec![]));
-        let client = crate::build_http_client(state.config.health.config.http_timeout_seconds);
-        let checks = build_checks(&state.config.health, &client);
+    #[tokio::test]
+    async fn configured_checks_only_include_present_sections() {
+        let state = test_app_state(Some(vec!["mock://up".to_string()]), None, Some(vec![])).await;
+        let checks = build_checks(&state.config.health).await;
         let names: Vec<_> = checks.keys().copied().collect();
 
         assert_eq!(names, vec!["disk", "http", "ping"]);

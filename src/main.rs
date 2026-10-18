@@ -7,7 +7,6 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
 };
 
 use mimalloc::MiMalloc;
@@ -66,6 +65,8 @@ pub struct HealthChecksConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct HttpCheckConfig {
     url: String,
+    /// IP ou hostname à résoudre à la place du hostname de l'URL. Le `Host`, le
+    /// SNI et la validation du certificat restent basés sur le nom de l'URL.
     resolve: Option<String>,
 }
 
@@ -105,8 +106,7 @@ async fn main() {
     let config_path = env::var("AXUM_HEALTH_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
     let config = load_config(config_path);
     let port = config.server.port;
-    let client = build_http_client(config.health.config.http_timeout_seconds);
-    let checks = health::build_checks(&config.health, &client);
+    let checks = health::build_checks(&config.health).await;
     let cert_path = config.server.tls.cert_path.clone();
     let key_path = config.server.tls.key_path.clone();
     let state = AppState {
@@ -125,14 +125,6 @@ async fn main() {
         .serve(app.into_make_service())
         .await
         .expect("server exited unexpectedly");
-}
-
-fn build_http_client(timeout_seconds: u64) -> reqwest::Client {
-    ensure_rustls_ring_provider();
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_seconds))
-        .build()
-        .expect("failed to build HTTP client")
 }
 
 pub(crate) fn ensure_rustls_ring_provider() {
@@ -165,7 +157,7 @@ fn load_config(path: impl AsRef<Path>) -> Config {
 }
 
 #[cfg(test)]
-pub(crate) fn test_app_state(
+pub(crate) async fn test_app_state(
     urls: Option<Vec<String>>,
     hosts: Option<Vec<String>>,
     disks: Option<Vec<DiskConfig>>,
@@ -202,8 +194,7 @@ pub(crate) fn test_app_state(
         },
     };
 
-    let client = build_http_client(config.health.config.http_timeout_seconds);
-    let checks = health::build_checks(&config.health, &client);
+    let checks = health::build_checks(&config.health).await;
 
     AppState {
         checks: Arc::new(checks),
